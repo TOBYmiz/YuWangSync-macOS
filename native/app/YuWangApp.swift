@@ -146,34 +146,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [NSToolbarItem.Identifier("back"), NSToolbarItem.Identifier("forward"), NSToolbarItem.Identifier("refresh"), .flexibleSpace,
          NSToolbarItem.Identifier("upload"), NSToolbarItem.Identifier("download"), NSToolbarItem.Identifier("newFolder"),
-         NSToolbarItem.Identifier("more"), NSToolbarItem.Identifier("tasks"), NSToolbarItem.Identifier("search")]
+         .space, NSToolbarItem.Identifier("tasks"), NSToolbarItem.Identifier("more"), .space, NSToolbarItem.Identifier("search")]
     }
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) + [.space] }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar).filter { $0 != .space } + [.space]
+    }
+    private func toolbarImage(_ symbol: String, description: String) -> NSImage? {
+        NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .regular, scale: .medium))
+    }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         if identifier.rawValue == "search" {
             let item = NSSearchToolbarItem(itemIdentifier: identifier); item.searchField.placeholderString = "筛选当前目录"
+            item.preferredWidthForSearchField = 220
+            // Bound the native field so it does not consume the flexible space
+            // separating navigation from file actions.
+            NSLayoutConstraint.activate([
+                item.searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+                item.searchField.widthAnchor.constraint(lessThanOrEqualToConstant: 220)
+            ])
             item.searchField.delegate = self; item.searchField.sendsSearchStringImmediately = true; item.label = "搜索"; searchItem = item; return item
         }
         if identifier.rawValue == "upload" || identifier.rawValue == "more" {
             let item = NSMenuToolbarItem(itemIdentifier: identifier); let menu = NSMenu()
+            item.showsIndicator = false; item.isBordered = true
             if identifier.rawValue == "upload" {
-                item.label = "上传"; item.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "上传")
+                item.label = "上传"; item.image = toolbarImage("square.and.arrow.up", description: "上传")
                 menu.addItem(self.item("上传文件…", #selector(uploadFiles))); menu.addItem(self.item("上传文件夹…", #selector(uploadFolder)))
             } else {
-                item.label = "更多"; item.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "更多操作")
+                item.label = "更多"; item.image = toolbarImage("ellipsis.circle", description: "更多操作")
                 menu.addItem(self.item("另存为…", #selector(exportSelected))); menu.addItem(self.item("重命名…", #selector(renameSelected)))
                 menu.addItem(self.item("移动到…", #selector(moveSelected))); menu.addItem(.separator()); menu.addItem(self.item("移到云端回收站…", #selector(deleteSelected)))
                 menu.addItem(.separator()); menu.addItem(self.item("设置…", #selector(settings)))
             }
-            item.menu = menu; return item
+            item.toolTip = item.label; item.menu = menu; return item
         }
         let specs: [String: (String, String, Selector)] = [
             "back": ("后退", "chevron.left", #selector(goBack)), "forward": ("前进", "chevron.right", #selector(goForward)),
-            "refresh": ("刷新", "arrow.clockwise", #selector(refresh)), "download": ("离线下载", "arrow.down.circle", #selector(download)),
+            "refresh": ("刷新", "arrow.clockwise", #selector(refresh)), "download": ("离线下载", "square.and.arrow.down", #selector(download)),
             "newFolder": ("新建文件夹", "folder.badge.plus", #selector(newFolder)), "tasks": ("传输与待办", "list.bullet.rectangle", #selector(toggleTasks))]
         guard let spec = specs[identifier.rawValue] else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier); item.label = spec.0; item.toolTip = spec.0
-        item.image = NSImage(systemSymbolName: spec.1, accessibilityDescription: spec.0); item.target = self; item.action = spec.2; return item
+        item.isBordered = true
+        item.image = toolbarImage(spec.1, description: spec.0); item.target = self; item.action = spec.2; return item
     }
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
         if item.itemIdentifier.rawValue == "download" { return !model.selection.isEmpty }

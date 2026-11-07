@@ -9,7 +9,13 @@ app="$root/artifacts/package/YuWangSync.app"
 if [[ -e "$app" ]]; then mv "$app" "$root/artifacts/package/YuWangSync.previous.$(uuidgen).app"; fi
 mkdir -p "$app/Contents/MacOS/Engine" "$app/Contents/Resources"
 dotnet publish src/YuWangSync.Engine/YuWangSync.Engine.csproj -c Release -r osx-arm64 \
-  --self-contained true -p:RestoreLockedMode=true -o "$app/Contents/MacOS/Engine"
+  --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false \
+  -p:RestoreLockedMode=true -o "$app/Contents/MacOS/Engine"
+mkdir -p "$app/Contents/Resources/Symbols"
+while IFS= read -r -d '' symbols; do mv "$symbols" "$app/Contents/Resources/Symbols/"; done < <(find "$app/Contents/MacOS/Engine" -type f -name '*.pdb' -print0)
+if find "$app/Contents/MacOS/Engine" -name '*.dll' -print -quit | grep -q .; then
+  echo 'Unexpected loose managed assembly in a macOS code directory.' >&2; exit 1
+fi
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macos14.0 \
   -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
   "$root"/native/app/*.swift -o "$app/Contents/MacOS/YuWangSync"

@@ -181,14 +181,19 @@ public sealed partial class Workspace
             var next = all.Where(o => !o.IsTerminal && !o.MutationStarted && o.Dependencies.Any(cancelled.Contains)).Select(o => o.Id).ToArray();
             var before = cancelled.Count; cancelled.UnionWith(next); if (before == cancelled.Count) break;
         }
-        var updates = all.Where(o => cancelled.Contains(o.Id)).Select(o => o with { State = OperationState.Cancelled, Error = "用户取消，相关本地内容保留。" }).ToArray();
+        var updates = all.Where(o => cancelled.Contains(o.Id)).Select(o => o with { State = OperationState.Cancelled,
+            CancelledBy = o.Id == operationId ? null : operationId, Error = "用户取消，相关本地内容保留。" }).ToArray();
         var newEntries = updates.Select(o => Store.GetEntry(o.EntryId)).OfType<Entry>().Where(e => e.RemoteId == 0).DistinctBy(e => e.Id)
             .Select(e => e with { RemoteMissing = true });
         Store.Save(newEntries, updates); Notify();
     }
     public void Retry(Guid operationId)
     {
-        Store.UpdateOperation(operationId, o => o.IsTerminal ? o : o with { State = o.MutationStarted ? OperationState.Uncertain : OperationState.Queued, RetryAfter = null, Error = null });
+        var op = Store.GetOperation(operationId) ?? throw new IOException("任务不存在。");
+        if (op.State == OperationState.Completed) return;
+        var restore = Store.Operations(op.AccountId).Where(o => o.Id == operationId || o.State == OperationState.Cancelled && o.CancelledBy == operationId)
+            .Select(o => o with { State = o.MutationStarted ? OperationState.Uncertain : OperationState.Queued, RetryAfter = null, Error = null, CancelledBy = null }).ToArray();
+        Store.Save(entries: restore.Select(o => Store.GetEntry(o.EntryId)).OfType<Entry>().Where(e => e.RemoteId == 0).DistinctBy(e => e.Id).Select(e => e with { RemoteMissing = false }), operations: restore);
         Notify();
     }
     public async Task ResolveAsync(Guid operationId, CollisionChoice choice, string? newName = null, CancellationToken ct = default)

@@ -65,6 +65,33 @@ public sealed class Fixture : IAsyncDisposable
 
 public sealed class WorkspaceTests
 {
+    [Fact] public async Task Clean_account_removal_clears_persisted_selection()
+    {
+        await using var f = await Fixture.CreateAsync(); await f.Workspace.RemoveAccountAsync(f.Account);
+        using var observer = new OperationStore(f.Files.DatabasePath); Assert.Null(observer.ActiveAccountId); Assert.Empty(observer.Accounts());
+    }
+    [Fact] public async Task Cancelled_edit_stays_cancelled_until_retry_or_new_content()
+    {
+        await using var f = await Fixture.CreateAsync(); var w = f.Workspace; var entry = f.Remote(1);
+        var path = await w.OpenAsync(entry.Id); await System.IO.File.WriteAllTextAsync(path, "cancel this save");
+        await w.ScanEditsAsync(); await Task.Delay(2100); await w.ScanEditsAsync();
+        var op = Assert.Single(w.Store.Operations()); w.Cancel(op.Id); await w.ScanEditsAsync();
+        Assert.Equal(OperationState.Cancelled, Assert.Single(w.Store.Operations()).State); Assert.False(await w.RunOnceAsync());
+        w.Retry(op.Id); await f.DrainAsync(); Assert.Equal(OperationState.Completed, w.Store.GetOperation(op.Id)!.State);
+    }
+    [Fact] public async Task Last_selected_account_is_persisted()
+    {
+        await using var f = await Fixture.CreateAsync(); var other = new Account(Guid.NewGuid(), "https://other.invalid", "other");
+        await f.Workspace.CompleteLoginAsync(other, "synthetic", new TestCloud());
+        using var observer = new OperationStore(f.Files.DatabasePath); Assert.Equal(other.Id, observer.ActiveAccountId);
+    }
+    [Fact] public async Task Removing_account_rechecks_unobserved_document_edits()
+    {
+        await using var f = await Fixture.CreateAsync(); var path = await f.Workspace.OpenAsync(f.Remote(1).Id);
+        await System.IO.File.WriteAllTextAsync(path, "save immediately before account removal");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => f.Workspace.RemoveAccountAsync(f.Account));
+        Assert.Single(f.Workspace.Store.Accounts());
+    }
     [Fact] public void Cached_filename_fits_mac_utf8_limit_without_splitting_unicode()
     {
         var name = LocalFiles.SafeName(string.Concat(Enumerable.Repeat("中文📁", 80)) + ".docx");

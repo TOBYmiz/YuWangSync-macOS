@@ -11,112 +11,127 @@ struct RootView: View {
         return entries.filter(\.isDirectory) + entries.filter { !$0.isDirectory }
     }
     var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 0) {
-                HStack {
-                    if let state = model.state, !state.accounts.isEmpty {
-                        Picker("账号", selection: Binding(get: { state.activeAccount?.id ?? "" }, set: { model.activate($0) })) {
-                            ForEach(state.accounts) { account in Text(account.displayName).tag(account.id) }
-                        }.labelsHidden()
-                    } else { Text("育网云").font(.headline) }
-                    Spacer()
-                    Button { model.loginAccount = nil; model.showLogin = true } label: { Image(systemName: "person.badge.plus") }.buttonStyle(.borderless).help("添加账号")
-                }.padding(12)
-                Divider()
-                List(selection: $model.sidebarSelection) {
-                    ForEach(model.sidebarNodes) { node in
-                        if node.id.hasPrefix("container:") {
-                            Section(node.title) {
-                                OutlineGroup(node.children ?? [], children: \.children) { child in Label(child.title, systemImage: child.symbol).tag(child.id) }
-                            }
-                        } else {
-                            OutlineGroup([node], children: \.children) { child in Label(child.title, systemImage: child.symbol).tag(child.id) }
-                        }
-                    }
-                }.listStyle(.sidebar)
-                Divider()
-                VStack(alignment: .leading, spacing: 5) {
-                    Label(model.state?.connectionStatus ?? "正在启动…", systemImage: model.state?.offline == true ? "wifi.slash" : "checkmark.icloud").font(.caption).foregroundStyle(.secondary)
-                    if model.state?.demo == true { Text("演示数据 · 不连接真实服务器").font(.caption2).foregroundStyle(.secondary) }
-                }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
-            }.navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 330)
-        } detail: {
-            VStack(spacing: 0) {
-                if model.state?.activeAccount == nil {
-                    if model.state == nil && model.errorMessage == nil { ProgressView("正在打开育网云…").frame(maxWidth: .infinity, maxHeight: .infinity) }
-                    else {
-                        ContentUnavailableView {
-                            Label("添加育网云账号", systemImage: "externaldrive.badge.icloud")
-                        } description: { Text("连接服务器后，在这里浏览和管理共享资源。") }
-                        actions: { Button("添加账号") { model.loginAccount = nil; model.showLogin = true }.buttonStyle(.borderedProminent) }
-                    }
-                } else {
-                    breadcrumbBar
-                    VSplitView {
-                        ZStack {
-                            Table(rows, selection: $model.selection, sortOrder: $sortOrder) {
-                                TableColumn("名称", value: \.name) { entry in
-                                    Label(entry.name, systemImage: entry.isDirectory ? "folder.fill" : "doc").onTapGesture(count: 2) { model.open(entry) }
-                                }.width(min: 180, ideal: 300)
-                                TableColumn("大小") { Text($0.sizeLabel).foregroundStyle(.secondary) }.width(min: 65, ideal: 90, max: 110)
-                                TableColumn("上传时间") { Text($0.dateLabel).foregroundStyle(.secondary) }.width(min: 130, ideal: 145, max: 180)
-                                TableColumn("状态") { Text($0.status).foregroundStyle(.secondary) }.width(min: 110, ideal: 180)
-                            }
-                            .contextMenu {
-                                Button("打开") { if let entry = model.selectedEntries.first { model.open(entry) } }
-                                Button("离线下载") { model.download() }
-                                Button("另存为…") { model.exportSelected() }
-                                Button("在访达中显示") { model.revealSelected() }.disabled(model.selectedEntries.first?.localPath == nil)
-                                Divider()
-                                Button("重命名…") { model.renameSelected() }
-                                Button("移动到…") { model.showMove = true }
-                                Button("移到云端回收站…", role: .destructive) { model.deleteSelected() }
-                            }
-                            if rows.isEmpty {
-                                ContentUnavailableView(model.filter.isEmpty ? "文件夹为空" : "没有匹配的文件", systemImage: "folder", description: Text(model.filter.isEmpty ? "可以上传文件或新建文件夹。" : "试试其他名称。"))
-                                    .allowsHitTesting(false)
-                            }
-                        }.frame(minHeight: 240)
-                        if model.showTasks { TaskPane(model: model).frame(minHeight: 150, idealHeight: 220, maxHeight: 340) }
-                    }
-                    statusBar
+        NavigationSplitView { sidebar } detail: { detail }
+            .frame(minWidth: 900, minHeight: 620)
+            .background(WindowCapture())
+            .onChange(of: model.sidebarSelection) { _, value in
+                if let value, !value.hasPrefix("container:"), value != model.state?.folderId {
+                    model.perform { try await model.navigate(value) }
                 }
             }
+            .sheet(isPresented: $model.showLogin) { LoginSheet(model: model, existing: model.loginAccount) }
+            .sheet(isPresented: $model.showCollisions) { CollisionSheet(model: model) }
+            .sheet(isPresented: $model.showMove) { MoveSheet(model: model) }
+            .alert("操作未完成", isPresented: Binding(get: { model.errorMessage != nil && !model.isSelfTest }, set: { if !$0 { model.errorMessage = nil } })) {
+                Button("确定") { model.errorMessage = nil }
+            } message: { Text(model.errorMessage ?? "") }
+            .task { model.start(); if model.isSelfTest { await NativeSelfTest.run(model: model) } }
+    }
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            HStack {
+                if let state = model.state, !state.accounts.isEmpty {
+                    Picker("账号", selection: Binding(get: { state.activeAccount?.id ?? "" }, set: { model.activate($0) })) {
+                        ForEach(state.accounts) { account in Text(account.label).tag(account.id) }
+                    }.labelsHidden()
+                } else { Text("育网云").font(.headline) }
+                Spacer()
+                Button { model.loginAccount = nil; model.showLogin = true } label: { Image(systemName: "person.badge.plus") }
+                    .buttonStyle(.borderless).help("添加账号")
+            }.padding(12)
+            Divider()
+            List(selection: $model.sidebarSelection) {
+                ForEach(model.sidebarNodes) { node in
+                    if node.id.hasPrefix("container:") {
+                        Section(node.title) {
+                            OutlineGroup(node.children ?? [], children: \.children) { child in Label(child.title, systemImage: child.symbol).tag(child.id) }
+                        }
+                    } else {
+                        OutlineGroup([node], children: \.children) { child in Label(child.title, systemImage: child.symbol).tag(child.id) }
+                    }
+                }
+            }.listStyle(.sidebar)
+            Divider()
+            VStack(alignment: .leading, spacing: 5) {
+                Label(model.state?.connectionStatus ?? "正在启动…", systemImage: model.state?.offline == true ? "wifi.slash" : "checkmark.icloud")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.state?.demo == true { Text("演示数据 · 不连接真实服务器").font(.caption2).foregroundStyle(.secondary) }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+        }.navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 330)
+    }
+    private var detail: some View {
+        content
             .navigationTitle(model.currentFolder?.name ?? "育网云")
             .navigationSubtitle(model.state?.activeAccount?.displayName ?? "")
             .toolbar { mainToolbar }
             .searchable(text: $model.filter, placement: .toolbar, prompt: "筛选当前目录")
-            .onDrop(of: [UTType.fileURL], isTargeted: $dropTarget) { providers in
-                guard model.state?.folderId != nil else { return false }
-                model.perform {
-                    var paths: [String] = []
-                    for provider in providers {
-                        let path: String? = await withCheckedContinuation { continuation in
-                            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                                if let data = item as? Data { continuation.resume(returning: URL(dataRepresentation: data, relativeTo: nil)?.path) }
-                                else if let url = item as? URL { continuation.resume(returning: url.path) }
-                                else { continuation.resume(returning: nil) }
-                            }
-                        }
-                        if let path { paths.append(path) }
-                    }
-                    if !paths.isEmpty { try await model.importPaths(paths) }
+    }
+    @ViewBuilder private var content: some View {
+        if model.state?.activeAccount == nil {
+            if model.state == nil && model.errorMessage == nil {
+                ProgressView("正在打开育网云…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView {
+                    Label("添加育网云账号", systemImage: "externaldrive.badge.icloud")
+                } description: { Text("连接服务器后，在这里浏览和管理共享资源。") }
+                actions: { Button("添加账号") { model.loginAccount = nil; model.showLogin = true }.buttonStyle(.borderedProminent) }
+            }
+        } else {
+            VStack(spacing: 0) {
+                breadcrumbBar
+                VSplitView {
+                    fileList.frame(minHeight: 240)
+                    if model.showTasks { TaskPane(model: model).frame(minHeight: 150, idealHeight: 220, maxHeight: 340) }
                 }
-                return true
+                statusBar
             }
         }
-        .frame(minWidth: 900, minHeight: 620)
-        .background(WindowCapture())
-        .onChange(of: model.sidebarSelection) { _, value in
-            if let value, !value.hasPrefix("container:"), value != model.state?.folderId { model.perform { try await model.navigate(value) } }
+    }
+    private var fileList: some View {
+        Table(rows, selection: $model.selection, sortOrder: $sortOrder) {
+            TableColumn("名称", value: \.name) { entry in
+                Label(entry.name, systemImage: entry.isDirectory ? "folder.fill" : "doc").onTapGesture(count: 2) { model.open(entry) }
+            }.width(min: 180, ideal: 300)
+            TableColumn("大小") { (entry: CloudEntry) in Text(entry.sizeLabel).foregroundStyle(.secondary) }.width(min: 65, ideal: 90, max: 110)
+            TableColumn("上传时间") { (entry: CloudEntry) in Text(entry.dateLabel).foregroundStyle(.secondary) }.width(min: 130, ideal: 145, max: 180)
+            TableColumn("状态") { (entry: CloudEntry) in Text(entry.status).foregroundStyle(.secondary) }.width(min: 110, ideal: 180)
         }
-        .sheet(isPresented: $model.showLogin) { LoginSheet(model: model, existing: model.loginAccount) }
-        .sheet(isPresented: $model.showCollisions) { CollisionSheet(model: model) }
-        .sheet(isPresented: $model.showMove) { MoveSheet(model: model) }
-        .alert("操作未完成", isPresented: Binding(get: { model.errorMessage != nil && !model.isSelfTest }, set: { if !$0 { model.errorMessage = nil } })) {
-            Button("确定") { model.errorMessage = nil }
-        } message: { Text(model.errorMessage ?? "") }
-        .task { model.start(); if model.isSelfTest { await NativeSelfTest.run(model: model) } }
+        .overlay {
+            if rows.isEmpty {
+                ContentUnavailableView(model.filter.isEmpty ? "文件夹为空" : "没有匹配的文件", systemImage: "folder", description: Text(model.filter.isEmpty ? "可以上传文件或新建文件夹。" : "试试其他名称。"))
+                    .allowsHitTesting(false)
+            }
+        }
+        .contextMenu { rowMenu }
+        .onDrop(of: [UTType.fileURL], isTargeted: $dropTarget, perform: acceptDrop)
+    }
+    @ViewBuilder private var rowMenu: some View {
+        Button("打开") { if let entry = model.selectedEntries.first { model.open(entry) } }
+        Button("离线下载") { model.download() }
+        Button("另存为…") { model.exportSelected() }
+        Button("在访达中显示") { model.revealSelected() }.disabled(model.selectedEntries.first?.localPath == nil)
+        Divider()
+        Button("重命名…") { model.renameSelected() }
+        Button("移动到…") { model.showMove = true }
+        Button("移到云端回收站…", role: .destructive) { model.deleteSelected() }
+    }
+    private func acceptDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard model.state?.folderId != nil else { return false }
+        model.perform {
+            var paths: [String] = []
+            for provider in providers {
+                let path: String? = await withCheckedContinuation { continuation in
+                    provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                        if let data = item as? Data { continuation.resume(returning: URL(dataRepresentation: data, relativeTo: nil)?.path) }
+                        else if let url = item as? URL { continuation.resume(returning: url.path) }
+                        else { continuation.resume(returning: nil) }
+                    }
+                }
+                if let path { paths.append(path) }
+            }
+            if !paths.isEmpty { try await model.importPaths(paths) }
+        }
+        return true
     }
     private var breadcrumbBar: some View {
         HStack(spacing: 8) {
@@ -197,7 +212,7 @@ struct TaskPane: View {
                 }
                 Spacer()
                 if let error = model.selectedOperation?.error { Text(error).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled) }
-            }.controlSize(.small).disabled(model.selectedOperation == nil || model.selectedOperation?.isTerminal == true).padding(10)
+            }.controlSize(.small).disabled(model.selectedOperation == nil || model.selectedOperation?.state == "completed").padding(10)
         }
     }
 }
@@ -206,7 +221,11 @@ struct LoginSheet: View {
     @ObservedObject var model: AppModel
     let existing: CloudAccount?
     @Environment(\.dismiss) private var dismiss
-    @State private var server = "", username = "", password = "", code = "", status = ""
+    @State private var server = ""
+    @State private var username = ""
+    @State private var password = ""
+    @State private var code = ""
+    @State private var status = ""
     @State private var image: NSImage?
     @State private var busy = false
     @State private var captured = ""

@@ -81,7 +81,8 @@ public sealed class EngineHost : IAsyncDisposable
             var account = new Account(Guid.NewGuid(), "https://example.invalid", "演示账号");
             await _workspace.CompleteLoginAsync(account, "", _workspace.CreateLoginClient(account, ""));
         }
-        else if (_workspace.Store.Accounts().FirstOrDefault() is { } account) await _workspace.ActivateAsync(account);
+        else if ((_workspace.Store.Accounts().FirstOrDefault(a => a.Id == _workspace.Store.ActiveAccountId) ?? _workspace.Store.Accounts().FirstOrDefault()) is { } account)
+            await _workspace.ActivateAsync(account);
         await LoadAccountAsync();
     }
     private async Task LoadAccountAsync()
@@ -221,7 +222,7 @@ public sealed class EngineHost : IAsyncDisposable
                 if (op.SnapshotPath is not { } source || !_files.Owns(source) || !File.Exists(source)) throw new IOException("任务没有可导出的内容快照。");
                 File.Copy(source, Text(p, "destination"), Flag(p, "overwrite")); return new { };
             case "pause": _workspace.SetPaused(Flag(p, "value")); return new { };
-            case "offline": _workspace.SetManualOffline(Flag(p, "value")); if (!_workspace.ManualOffline) await _workspace.ReconnectAsync(_done.Token); return new { };
+            case "offline": if (Flag(p, "value")) _transfer?.Cancel(); _workspace.SetManualOffline(Flag(p, "value")); if (!_workspace.ManualOffline) await _workspace.ReconnectAsync(_done.Token); return new { };
             case "removeAccount": await _workspace.RemoveAccountAsync(_workspace.Store.Accounts().Single(a => a.Id == Id(p, "accountId")), _done.Token); lock (_stateLock) _folder = null; return State();
             case "cleanup": return new { count = await _workspace.CleanupAsync(Flag(p, "allClean"), _done.Token) };
             case "shutdown": await DisposeAsync(); return new { };

@@ -71,6 +71,7 @@ public sealed partial class Workspace : IAsyncDisposable
         {
             _client?.Dispose(); _accountStop.Dispose(); _accountStop = new();
             _client = client; ActiveAccount = account; Offline = !online;
+            Store.ActiveAccountId = account.Id;
             ConnectionStatus = online ? "在线" : "离线缓存"; _scanRequested = true;
         }
         finally { _network.Release(); }
@@ -78,12 +79,15 @@ public sealed partial class Workspace : IAsyncDisposable
     }
     public async Task RemoveAccountAsync(Account account, CancellationToken ct = default)
     {
+        foreach (var entry in Store.Entries(account.Id).Where(e => e.LocalPath is not null))
+            if (File.Exists(entry.LocalPath) && await LocalFiles.HashAsync(entry.LocalPath!, ct) != entry.ContentHash)
+                Store.UpdateEntry(entry.Id, e => e with { Dirty = true });
         if (Store.Operations(account.Id).Any(o => !o.IsTerminal) || Store.Entries(account.Id).Any(e => e.Dirty))
             throw new InvalidOperationException("该账号仍有待办或本地修改，请先处理或导出。");
         if (account.Id == ActiveAccount?.Id)
         {
             _accountStop.Cancel(); _currentStop?.Cancel(); await _network.WaitAsync(ct);
-            try { Store.RemoveAccount(account.Id); _client?.Dispose(); _client = null; ActiveAccount = null; Offline = true; }
+            try { Store.RemoveAccount(account.Id); Store.ActiveAccountId = null; _client?.Dispose(); _client = null; ActiveAccount = null; Offline = true; }
             finally { _network.Release(); }
         }
         else Store.RemoveAccount(account.Id);

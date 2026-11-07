@@ -7,6 +7,7 @@ namespace YuWangSync.Core.Storage;
 public interface IOperationStore : IDisposable
 {
     IReadOnlyList<Account> Accounts();
+    Guid? ActiveAccountId { get; set; }
     void SaveAccount(Account account);
     void RemoveAccount(Guid account);
     Entry? GetEntry(Guid id);
@@ -36,6 +37,7 @@ public sealed class OperationStore : IOperationStore
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, json TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY, account TEXT NOT NULL, json TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS entries_account ON entries(account);
             CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY, account TEXT NOT NULL, created TEXT NOT NULL, json TEXT NOT NULL);
@@ -61,6 +63,15 @@ public sealed class OperationStore : IOperationStore
         }
     }
     public IReadOnlyList<Account> Accounts() => Read<Account>("SELECT json FROM accounts ORDER BY id");
+    public Guid? ActiveAccountId
+    {
+        get => Read<Guid?>("SELECT json FROM preferences WHERE key='active-account'").FirstOrDefault();
+        set
+        {
+            if (value is null) Write("DELETE FROM preferences WHERE key='active-account'");
+            else Write("INSERT OR REPLACE INTO preferences VALUES('active-account',$j)", ("$j", JsonSerializer.Serialize(value, Json)));
+        }
+    }
     public IReadOnlyList<Entry> Entries(Guid account) => Read<Entry>("SELECT json FROM entries WHERE account=$a", ("$a", account.ToString()));
     public Entry? GetEntry(Guid id) => Read<Entry>("SELECT json FROM entries WHERE id=$id", ("$id", id.ToString())).SingleOrDefault();
     public Operation? GetOperation(Guid id) => Read<Operation>("SELECT json FROM operations WHERE id=$id", ("$id", id.ToString())).SingleOrDefault();

@@ -52,7 +52,11 @@ public sealed partial class Workspace
                     var hash = await LocalFiles.HashAsync(path, ct);
                     if (hash == entry.ContentHash) continue;
                     Store.UpdateEntry(entry.Id, e => e with { Dirty = true });
-                    var pending = Store.Operations(account.Id).Where(o => o.EntryId == entry.Id && o.Kind == OperationKind.Upload && !o.IsTerminal).ToArray();
+                    var uploads = Store.Operations(account.Id).Where(o => o.EntryId == entry.Id && o.Kind == OperationKind.Upload).ToArray();
+                    // Cancelling an edit snapshot is an explicit choice. Do not silently
+                    // recreate it on the next watcher event; a new save or Retry can resume.
+                    if (uploads.LastOrDefault() is { State: OperationState.Cancelled } cancelled && cancelled.SnapshotHash == hash) continue;
+                    var pending = uploads.Where(o => !o.IsTerminal).ToArray();
                     if (pending.LastOrDefault()?.SnapshotHash == hash) continue;
                     var snapshot = await _snapshots.CaptureAsync(path, Files.SnapshotDirectory(account.Id), ct);
                     if (entry.ParentId is not { } parent) throw new IOException("编辑副本没有目标父目录。");

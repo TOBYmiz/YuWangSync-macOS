@@ -5,6 +5,7 @@ struct CloudAccount: Decodable, Identifiable, Hashable {
     let server: String
     let username: String
     let displayName: String
+    var label: String { displayName + " · " + (URL(string: server)?.host ?? server) }
 }
 struct CloudEntry: Decodable, Identifiable, Hashable {
     let id: String

@@ -72,6 +72,7 @@ public sealed record Operation
     public string? Error { get; init; }
     public DateTimeOffset Created { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? RetryAfter { get; init; }
+    public Guid? CancelledBy { get; init; }
     public bool IsTerminal => State is OperationState.Completed or OperationState.Cancelled;
     public string StateLabel => State switch
     {

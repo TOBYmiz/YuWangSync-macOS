@@ -84,6 +84,13 @@ public sealed partial class Workspace
 
     public async Task<bool> RunOnceAsync(CancellationToken ct = default)
     {
+        if (_verifying && HasReadyForegroundWork()) PreemptVerification();
+        await _execution.WaitAsync(ct);
+        try { return await RunOnceCoreAsync(ct); }
+        finally { _execution.Release(); }
+    }
+    private async Task<bool> RunOnceCoreAsync(CancellationToken ct)
+    {
         if (Paused || Offline || ManualOffline || ActiveAccount is not { } account || _client is null) return false;
         Operation? op = null;
         await _planning.WaitAsync(ct);
@@ -102,24 +109,58 @@ public sealed partial class Workspace
                 if (dependencies.Any(d => d!.State != OperationState.Completed)) continue;
                 op = candidate; Store.UpdateOperation(op.Id, o => o with { State = OperationState.Running, Error = null }); break;
             }
+            if (op is null && Volatile.Read(ref _foregroundTransfers) == 0)
+            {
+                var verification = all.FirstOrDefault(o => o.State == OperationState.AwaitingVerification
+                    && (o.VerificationRequested || VerificationAllowed) && (o.RetryAfter is null || o.RetryAfter <= DateTimeOffset.UtcNow));
+                if (verification is not null)
+                {
+                    op = verification with { RunVerification = true };
+                    Store.UpdateOperation(op.Id, current => current with { State = OperationState.Running, Error = null });
+                }
+            }
         }
         finally { _planning.Release(); }
         if (op is null) return false;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _stop.Token, _accountStop.Token);
-        _currentStop = linked; _runningId = op.Id; Notify();
-        var acquired = false;
+        _currentStop = linked; _runningId = op.Id; _verifying = op.RunVerification;
+        if (_verifying && (Volatile.Read(ref _foregroundTransfers) != 0 || !VerificationAllowed && !op.VerificationRequested)) linked.Cancel();
+        Notify();
         try
         {
-            await _network.WaitAsync(linked.Token); acquired = true;
-            if (ActiveAccount?.Id != account.Id || _client is null) throw new OperationCanceledException();
-            await ExecuteAsync(Store.GetOperation(op.Id)!, _client, linked.Token);
+            await WithCloudAsync(account.Id, async (cloud, token) =>
+            { await ExecuteAsync(Store.GetOperation(op.Id)! with { RunVerification = op.RunVerification }, cloud, token); return true; }, linked.Token);
+        }
+        catch (UploadVerificationPendingException pending)
+        {
+            var entry = FromRemote(RequireEntry(op.EntryId), pending.Candidate, op.TargetParentId!.Value);
+            Remember(op.Id, current => current with { NewRemoteId = pending.Candidate.Id,
+                VerificationStamp = Entry.Stamp(pending.Candidate), VerificationRequired = pending.Required,
+                State = OperationState.AwaitingVerification, Error = "已上传，空闲且网络允许时下载校验。", RetryAfter = null });
+            Store.UpdateEntry(entry.Id, current => FromRemote(current, pending.Candidate, op.TargetParentId.Value));
+            // Disabling optional verification only skips a fresh, fully acknowledged
+            // upload with an unchanged name. Recovery and overwrite backups stay pending.
+            if (!Settings.VerifyAfterUpload && !pending.Required)
+            {
+                try
+                {
+                    var size = await WithCloudAsync(op.AccountId, (c, token) => c.SizeAsync(entry, token), linked.Token);
+                    if (size == op.SnapshotLength)
+                    {
+                        Complete(op, entry with { Size = size, SizeStamp = entry.RemoteStamp, Status = "已上传 · 未下载校验" });
+                        Remember(op.Id, current => current with { Error = "已按设置跳过下载校验。" });
+                    }
+                }
+                catch (Exception error) when (error is IOException or HttpRequestException or OperationCanceledException)
+                { Log?.Invoke("上传结果待核对，保留候选文件与快照。"); }
+            }
         }
         catch (OperationCanceledException)
         {
             Store.UpdateOperation(op.Id, current => current.IsTerminal ? current : current with
             {
-                State = current.MutationStarted ? OperationState.Uncertain : OperationState.Queued,
-                Error = "操作已暂停，内容与恢复记录已保存。",
+                State = op.RunVerification ? OperationState.AwaitingVerification : current.MutationStarted ? OperationState.Uncertain : OperationState.Queued,
+                Error = op.RunVerification ? "校验已让出带宽，空闲后继续。" : "操作已暂停，内容与恢复记录已保存。",
                 RetryAfter = current.RetryAfter == DateTimeOffset.MaxValue ? current.RetryAfter : null
             });
         }
@@ -129,12 +170,12 @@ public sealed partial class Workspace
             Store.UpdateOperation(op.Id, current => current with
             {
                 State = e is ConflictException or UnauthorizedAccessException ? OperationState.Blocked
-                    : current.MutationStarted ? OperationState.Uncertain : e is HttpRequestException or TimeoutException ? OperationState.Queued : OperationState.Failed,
+                    : op.RunVerification ? OperationState.AwaitingVerification : current.MutationStarted ? OperationState.Uncertain : e is HttpRequestException or TimeoutException ? OperationState.Queued : OperationState.Failed,
                 Error = SafeError(e), RetryAfter = current.MutationStarted || e is HttpRequestException or TimeoutException ? DateTimeOffset.UtcNow.AddSeconds(30) : null
             });
             Log?.Invoke("任务未完成：" + SafeError(e));
         }
-        finally { _currentStop = null; _runningId = null; if (acquired) _network.Release(); Notify(); }
+        finally { _verifying = false; _currentStop = null; _runningId = null; Notify(); }
         return true;
     }
     private static string SafeError(Exception error) => error is HttpRequestException ? "网络请求失败，稍后重连后核对。"
@@ -222,6 +263,9 @@ public sealed partial class Workspace
     }
     private async Task ExecuteUploadAsync(Operation op, Entry entry, Entry parent, FolderListingResult target, ICloudClient cloud, CancellationToken ct)
     {
+        if (op.RunVerification && (target.Items.SingleOrDefault(i => i.Id == op.NewRemoteId) is not { } candidate
+            || Entry.Stamp(candidate) != op.VerificationStamp))
+            throw new ConflictException("待校验文件的云端版本已变化，保留内容并停止自动处理。");
         if (op.SnapshotPath is null || op.SnapshotHash is null || !Files.Owns(op.SnapshotPath) || !File.Exists(op.SnapshotPath))
             throw new IOException("上传快照缺失，未发送内容。");
         LocalFiles.RejectLinks(op.SnapshotPath);
@@ -234,7 +278,7 @@ public sealed partial class Workspace
             {
                 if (old is null || Entry.Stamp(old) != op.BaselineStamp) throw new ConflictException("云端文件已更新、移动或删除，暂停覆盖。");
                 if (op.BaselineHash is null) throw new ConflictException("没有可靠的编辑基准，请明确确认覆盖或另存副本。");
-                var currentHash = await cloud.HashAsync(old.Id, ct);
+                var currentHash = await cloud.HashAsync(entry with { Name = old.Name, DeclaredSize = old.Size }, ct);
                 if (currentHash.Hash != op.BaselineHash) throw new ConflictException("云端内容已被其他操作修改，请处理冲突。");
             }
             else if (target.Items.Any(i => i.Name.Equals(op.Name, StringComparison.OrdinalIgnoreCase)))
@@ -249,7 +293,8 @@ public sealed partial class Workspace
         // original baseline before we let the inherited replacement protocol recycle it.
         if (op.OldRemoteId != 0 && target.Items.Any(i => i.Id == op.OldRemoteId))
         {
-            if (op.BaselineHash is null || (await cloud.HashAsync(op.OldRemoteId, ct)).Hash != op.BaselineHash)
+            var old = target.Items.Single(i => i.Id == op.OldRemoteId);
+            if (op.BaselineHash is null || (await cloud.HashAsync(entry with { RemoteId = old.Id, Name = old.Name, DeclaredSize = old.Size }, ct)).Hash != op.BaselineHash)
                 throw new ConflictException("原文件或备份内容发生变化，保留两端内容并暂停事务。");
         }
         await using var input = new FileStream(op.SnapshotPath!, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true);
@@ -260,7 +305,7 @@ public sealed partial class Workspace
                 UploadStage.Verifying => "下载复核", _ => "确认结果" }, p.Stage == UploadStage.Verifying ? p.VerifiedBytes : p.SentBytes, p.TotalBytes)), ct);
         Remember(op.Id, o => o with { NewRemoteId = uploaded.Id });
         entry = RequireEntry(entry.Id);
-        var completed = FromRemote(entry, uploaded, parent.Id);
+        var completed = FromRemote(entry, uploaded, parent.Id) with { Size = op.SnapshotLength, SizeStamp = Entry.Stamp(uploaded), Status = "" };
         if (entry.LocalPath is { } local && File.Exists(local) && op.SourcePath == local)
         {
             var current = await LocalFiles.HashAsync(local, ct);
@@ -271,7 +316,7 @@ public sealed partial class Workspace
         _scanRequested = true;
     }
     private static Entry FromRemote(Entry entry, YuWangItem remote, Guid parent) => entry with
-    { RemoteId = remote.Id, Name = remote.Name, ParentId = parent, Size = remote.Size, UploadTime = remote.UploadTime,
+    { RemoteId = remote.Id, Name = remote.Name, ParentId = parent, Size = remote.Size, DeclaredSize = remote.Size, SizeStamp = null, UploadTime = remote.UploadTime,
         RemoteStamp = Entry.Stamp(remote), RemoteMissing = false };
     private async Task<Dictionary<ulong, string>> RemoteTreeAsync(ulong disk, ulong folder, ICloudClient cloud, CancellationToken ct)
     {
@@ -290,6 +335,10 @@ public sealed partial class Workspace
         await Visit(folder, 0); return result;
     }
     private void Complete(Operation op, Entry entry)
+    {
+        lock (_metadataGate) CompleteCore(op, entry);
+    }
+    private void CompleteCore(Operation op, Entry entry)
     {
         var priorEntry = RequireEntry(entry.Id);
         var all = Store.Operations(op.AccountId);

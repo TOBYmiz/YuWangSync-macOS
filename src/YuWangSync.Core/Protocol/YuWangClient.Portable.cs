@@ -6,6 +6,29 @@ namespace YuWangCloudSync.Net;
 public sealed partial class YuWangClient
 {
     private readonly AsyncLocal<CancellationToken> _callCancellation = new();
+    public bool DeferPostUploadVerification { get; set; }
+    private readonly SemaphoreSlim _mutationGate = new(1, 1);
+    private sealed class MutationLease(SemaphoreSlim gate) : IDisposable { public void Dispose() => gate.Release(); }
+    private async Task<IDisposable> EnterMutationAsync(CancellationToken ct = default)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _callCancellation.Value, _lifetimeToken);
+        await _mutationGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        return new MutationLease(_mutationGate);
+    }
+    private async Task WaitForFolderContextAsync(CancellationToken ct = default)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _callCancellation.Value, _lifetimeToken);
+        await _folderContextGate.WaitAsync(linked.Token).ConfigureAwait(false);
+    }
+    // Only call while owning both the mutation gate and the folder-context gate.
+    // Binary requests carry their own token/file identity and do not need the
+    // session's current folder. Reacquire even on cancellation to balance the caller.
+    private async Task<T> WithoutFolderContextAsync<T>(Func<Task<T>> action)
+    {
+        _folderContextGate.Release();
+        try { return await action().ConfigureAwait(false); }
+        finally { await _folderContextGate.WaitAsync().ConfigureAwait(false); }
+    }
     public async Task<T> InCallAsync<T>(CancellationToken ct, Func<Task<T>> action)
     {
         var previous = _callCancellation.Value; _callCancellation.Value = ct;
@@ -48,23 +71,4 @@ public sealed partial class YuWangClient
         });
     }
 
-    public async Task<DownloadReceipt> HashRemoteAsync(ulong id, CancellationToken ct)
-    {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetimeToken);
-        deadline.CancelAfter(_downloadTimeout);
-        using var request = MakeRequest(HttpMethod.Post, "/fmsFileInfoAction.do?method=downSelectFile",
-            new FormUrlEncodedContent([new KeyValuePair<string, string>("selectitemid", id.ToString())]));
-        using var response = await SendAsync(request, _downloadTimeout, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(deadline.Token).ConfigureAwait(false);
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[128 * 1024]; long length = 0;
-        while (true)
-        {
-            var read = await stream.ReadAsync(buffer, deadline.Token).ConfigureAwait(false);
-            if (read == 0) break;
-            hash.AppendData(buffer, 0, read); length += read;
-        }
-        return new(Convert.ToHexString(hash.GetHashAndReset()), length);
-    }
 }

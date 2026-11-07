@@ -8,6 +8,7 @@ public interface IOperationStore : IDisposable
 {
     IReadOnlyList<Account> Accounts();
     Guid? ActiveAccountId { get; set; }
+    SyncSettings Settings { get; set; }
     void SaveAccount(Account account);
     void RemoveAccount(Guid account);
     Entry? GetEntry(Guid id);
@@ -48,7 +49,7 @@ public sealed class OperationStore : IOperationStore
         cmd.ExecuteNonQuery();
         // A killed process may have sent a request without persisting its response.
         Save(operations: Operations().Where(o => o.State == OperationState.Running).Select(o => o with
-        { State = OperationState.Uncertain, Error = "上次运行中断，先核对云端结果。" }));
+        { State = o.VerificationStamp is null ? OperationState.Uncertain : OperationState.AwaitingVerification, Error = "上次运行中断，先核对云端结果。" }));
     }
     private List<T> Read<T>(string sql, params (string, object?)[] parameters)
     {
@@ -63,6 +64,11 @@ public sealed class OperationStore : IOperationStore
         }
     }
     public IReadOnlyList<Account> Accounts() => Read<Account>("SELECT json FROM accounts ORDER BY id");
+    public SyncSettings Settings
+    {
+        get => Read<SyncSettings>("SELECT json FROM preferences WHERE key='sync-settings'").FirstOrDefault() ?? new();
+        set => Write("INSERT OR REPLACE INTO preferences VALUES('sync-settings',$j)", ("$j", JsonSerializer.Serialize(value, Json)));
+    }
     public Guid? ActiveAccountId
     {
         get => Read<Guid?>("SELECT json FROM preferences WHERE key='active-account'").FirstOrDefault();

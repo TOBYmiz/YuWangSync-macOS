@@ -447,6 +447,7 @@ sealed class WebServer : HttpMessageHandler
     private readonly HashSet<ulong> _publishedUploads = [];
     public int TokenCount;
     public Func<Task>? BeforeChunkReply;
+    public Func<Task>? BeforeDownloadReply;
     private ulong _nextId = 1000, _currentFolder = 10, _cut;
     private readonly Dictionary<string, (string Name, ulong Folder, long Size, MemoryStream Data)> _uploads = [];
     public void Add(ulong id, string name, byte[] data) => Items[id] = new(id, name, data);
@@ -481,6 +482,22 @@ sealed class WebServer : HttpMessageHandler
         var uri = request.RequestUri!;
         var q = Fields(uri.Query);
         var method = q.GetValueOrDefault("method", "");
+        if (uri.AbsolutePath == "/fmsPicPlayerAction.jsx")
+            return Text("upload_dir/sketch/202601/" + ulong.Parse(q["id"]).ToString("x32") + ".png");
+        if (uri.AbsolutePath.StartsWith("/upload_dir/file/", StringComparison.Ordinal))
+        {
+            var id = ulong.Parse(Path.GetFileNameWithoutExtension(uri.AbsolutePath), System.Globalization.NumberStyles.HexNumber);
+            var bytes = CorruptDownload ? new byte[] { 1, 2, 3 } : Items[id].Bytes;
+            if (request.Method == HttpMethod.Get)
+            {
+                Events.Add("download:" + id);
+                if (BeforeDownloadReply is { } beforeDownload) await beforeDownload().WaitAsync(cancellationToken);
+            }
+            var content = new ByteArrayContent(request.Method == HttpMethod.Head ? [] : bytes);
+            content.Headers.ContentLength = bytes.Length;
+            return new(HttpStatusCode.OK) { Content = content };
+        }
+        if (uri.AbsolutePath == "/sysFrameAction.do" && method == "frame_desk") return Text("<html>active session</html>");
         if (method == "list")
         {
             _currentFolder = ulong.Parse(q["folderid"]);
@@ -551,9 +568,7 @@ sealed class WebServer : HttpMessageHandler
         var f = request.Content is null ? new Dictionary<string, string>() : Fields(await request.Content.ReadAsStringAsync(cancellationToken));
         if (method == "downSelectFile")
         {
-            var id = ulong.Parse(f["selectitemid"]);
-            Events.Add("download:" + id);
-            return new(HttpStatusCode.OK) { Content = new ByteArrayContent(CorruptDownload ? [1, 2, 3] : Items[id].Bytes) };
+            throw new InvalidOperationException("Legacy download endpoint must not be used.");
         }
         if (method is "changeFileName" or "changeFolderName")
         {

@@ -238,7 +238,7 @@ public sealed partial class YuWangClient : IDisposable
     /// </summary>
     public async Task<string> FetchFolderHtmlAsync(ulong diskId, ulong folderId)
     {
-        await _folderContextGate.WaitAsync(_lifetimeToken).ConfigureAwait(false);
+        await WaitForFolderContextAsync().ConfigureAwait(false);
         try { return await FetchFolderHtmlCoreAsync(diskId, folderId).ConfigureAwait(false); }
         finally { _folderContextGate.Release(); }
     }
@@ -251,7 +251,7 @@ public sealed partial class YuWangClient : IDisposable
 
     public async Task<FolderListingResult> ListFolderWithPermissionsAsync(ulong diskId, ulong folderId, bool fresh = false)
     {
-        await _folderContextGate.WaitAsync(_lifetimeToken).ConfigureAwait(false);
+        await WaitForFolderContextAsync().ConfigureAwait(false);
         try
         {
             var html = await FetchFolderHtmlCoreAsync(diskId, folderId, fresh).ConfigureAwait(false);
@@ -322,7 +322,8 @@ public sealed partial class YuWangClient : IDisposable
     /// <summary>Delete one cloud item after rechecking write capability in its parent directory.</summary>
     public async Task<bool> DeleteRemoteItemAsync(ulong diskId, ulong parentFolderId, ulong itemId, bool isFolder)
     {
-        await _folderContextGate.WaitAsync(_lifetimeToken).ConfigureAwait(false);
+        using var mutation = await EnterMutationAsync().ConfigureAwait(false);
+        await WaitForFolderContextAsync().ConfigureAwait(false);
         try { return await DeleteRemoteItemCoreAsync(diskId, parentFolderId, itemId, isFolder).ConfigureAwait(false); }
         finally { _folderContextGate.Release(); }
     }
@@ -332,7 +333,8 @@ public sealed partial class YuWangClient : IDisposable
         bool isFolder, ulong? targetFolderId, string newName)
     {
         if (string.IsNullOrWhiteSpace(newName)) return false;
-        await _folderContextGate.WaitAsync(_lifetimeToken).ConfigureAwait(false);
+        using var mutation = await EnterMutationAsync().ConfigureAwait(false);
+        await WaitForFolderContextAsync().ConfigureAwait(false);
         try
         {
             var sourceHtml = await FetchWritableFolderCoreAsync(diskId, sourceFolderId).ConfigureAwait(false);
@@ -990,7 +992,7 @@ public sealed partial class YuWangClient : IDisposable
         try
         {
             var html = await FetchDiskTreeHtmlAsync(rootContainerTypeId);
-            IsLoggedIn = !HtmlParser.IsLoginPage(html);
+            IsLoggedIn = !string.IsNullOrWhiteSpace(html) && !HtmlParser.IsLoginPage(html);
             return IsLoggedIn;
         }
         catch { return false; }

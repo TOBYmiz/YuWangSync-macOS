@@ -20,6 +20,7 @@ struct CloudEntry: Decodable, Identifiable, Hashable {
     let sizeLabel: String
     let uploadTime: String?
     let localPath: String?
+    let lastListed: String?
     let status: String
     var dateLabel: String { String((uploadTime ?? "—").prefix(16)).replacingOccurrences(of: "T", with: " ") }
 }
@@ -56,8 +57,15 @@ struct ClientState: Decodable {
     let paused: Bool
     let connectionStatus: String
     let dataDirectory: String
+    let settings: SyncSettings
+    let networkCost: String
+}
+struct SyncSettings: Decodable {
+    let verifyAfterUpload: Bool
+    let verifyOnExpensiveNetwork: Bool
 }
 struct TransferState: Decodable {
+    let operationId: String?
     let name: String
     let stage: String
     let completed: Int64
@@ -69,6 +77,7 @@ struct SidebarNode: Identifiable {
     let title: String
     let symbol: String
     let children: [SidebarNode]?
+    var unloaded = false
 }
 struct BridgeError: LocalizedError {
     let message: String

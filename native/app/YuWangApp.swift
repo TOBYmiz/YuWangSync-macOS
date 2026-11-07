@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     static weak var shared: AppDelegate?
     var mainWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var aboutWindow: NSWindow?
     private var statusItem: NSStatusItem?
     private var statusLine: NSMenuItem?
     private var searchItem: NSSearchToolbarItem?
@@ -99,14 +100,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         item.menu = menu; statusItem = item
     }
     @objc func showWindow() { mainWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
-    @objc private func about() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "育网云", .applicationVersion: "0.1.0"]) }
-    @objc private func settings() {
+    @objc private func about() { _ = showAboutWindow() }
+    func showAboutWindow() -> NSWindow {
+        if aboutWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 620), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            window.title = "关于育网云"; window.contentViewController = NSHostingController(rootView: AboutView())
+            window.contentMinSize = NSSize(width: 520, height: 480)
+            window.isReleasedWhenClosed = false; window.center(); aboutWindow = window
+        }
+        aboutWindow!.makeKeyAndOrderFront(nil); return aboutWindow!
+    }
+    @objc private func settings() { _ = showSettingsWindow() }
+    func showSettingsWindow() -> NSWindow {
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 600), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 680), styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "育网云设置"; window.contentViewController = NSHostingController(rootView: SettingsView(model: model))
             window.isReleasedWhenClosed = false; window.center(); settingsWindow = window
         }
-        settingsWindow?.makeKeyAndOrderFront(nil)
+        settingsWindow!.makeKeyAndOrderFront(nil); return settingsWindow!
     }
     @objc private func togglePause() { model.perform { _ = try await self.model.send("pause", ["value": self.model.state?.paused != true]) } }
     @objc private func refresh() { model.perform { _ = try await self.model.send("refresh") } }
@@ -129,6 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     @discardableResult func prepareForTermination() async -> Bool {
         if readyToTerminate { return true }
         quitting = true
+        model.stopMonitoring()
         NativeDiagnostics.write("preparing application termination")
         let confirmed = await model.bridge.shutdown()
         readyToTerminate = true
@@ -263,10 +275,20 @@ enum NativeSelfTest {
             try capture(window, to: URL(fileURLWithPath: screenshot.path + "-minimum.png"))
             checks["minimum-window-screenshot"] = true
             window.setFrame(originalFrame, display: true)
+            let settings = AppDelegate.shared!.showSettingsWindow()
+            try await Task.sleep(nanoseconds: 300_000_000)
+            checks["native-settings-window"] = settings.isVisible
+            try capture(settings, to: URL(fileURLWithPath: screenshot.path + "-settings.png")); settings.orderOut(nil)
+            let about = AppDelegate.shared!.showAboutWindow()
+            try await Task.sleep(nanoseconds: 300_000_000)
+            checks["native-about-window"] = about.isVisible
+            try capture(about, to: URL(fileURLWithPath: screenshot.path + "-about.png")); about.orderOut(nil)
+            let notices = Bundle.main.url(forResource: "OpenSourceNotices", withExtension: "txt").flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+            checks["bundled-open-source-notices"] = notices.contains("TOBYmiz") && notices.contains("Apache License") && notices.contains(".NET Runtime third-party notices")
         } catch let failure { error = failure.localizedDescription + "\n" + model.bridge.stderr }
         NativeDiagnostics.write("self-test requesting engine shutdown")
         checks["engine-shutdown"] = await AppDelegate.shared?.prepareForTermination() == true
-        let passed = checks.count == 13 && checks.values.allSatisfy { $0 } && error.isEmpty
+        let passed = checks.count == 16 && checks.values.allSatisfy { $0 } && error.isEmpty
         do {
             let output = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: ["passed": passed, "nativeControls": true, "checks": checks, "windowChrome": chrome, "error": error], options: [.prettyPrinted, .sortedKeys])

@@ -9,7 +9,7 @@ namespace YuWangSync.Core;
 public class DemoCloudClient : ICloudClient
 {
     public sealed record Item(ulong Id, ulong Parent, string Name, bool Directory, byte[] Data, DateTime Modified);
-    public Dictionary<ulong, Item> Items { get; } = [];
+    public System.Collections.Concurrent.ConcurrentDictionary<ulong, Item> Items { get; } = [];
     private ulong _next = 100;
     public DemoCloudClient()
     {
@@ -19,7 +19,7 @@ public class DemoCloudClient : ICloudClient
     }
     public string? SessionId => "synthetic-demo-session";
     public void SetSession(string? session) { }
-    public Task<bool> CheckSessionAsync(CancellationToken ct) => Task.FromResult(true);
+    public virtual Task<bool> CheckSessionAsync(CancellationToken ct) => Task.FromResult(true);
     public Task<byte[]> CaptchaAsync(CancellationToken ct) => Task.FromResult(Array.Empty<byte>());
     public Task<bool> LoginAsync(string code, CancellationToken ct) => Task.FromResult(true);
     public Task<IReadOnlyList<DiskTreeNode>> TreeAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<DiskTreeNode>>([
@@ -33,8 +33,9 @@ public class DemoCloudClient : ICloudClient
         var bytes = Items[entry.RemoteId].Data; await output.WriteAsync(bytes, ct); progress?.Invoke(bytes.Length, bytes.Length);
         return new(Convert.ToHexString(SHA256.HashData(bytes)), bytes.Length);
     }
-    public virtual Task<DownloadReceipt> HashAsync(ulong id, CancellationToken ct)
-    { var bytes = Items[id].Data; return Task.FromResult(new DownloadReceipt(Convert.ToHexString(SHA256.HashData(bytes)), bytes.Length)); }
+    public virtual Task<long?> SizeAsync(Entry entry, CancellationToken ct) => Task.FromResult<long?>(Items[entry.RemoteId].Data.LongLength);
+    public virtual Task<DownloadReceipt> HashAsync(Entry entry, CancellationToken ct)
+    { var bytes = Items[entry.RemoteId].Data; return Task.FromResult(new DownloadReceipt(Convert.ToHexString(SHA256.HashData(bytes)), bytes.Length)); }
     public virtual Task<YuWangItem> CreateFolderAsync(ulong disk, ulong parent, string name, ulong existingId, Action<ulong> rememberId, Action<ulong[]> beforeCreate, CancellationToken ct)
     {
         if (existingId != 0) return Task.FromResult(Remote(Items[existingId]));
@@ -43,15 +44,23 @@ public class DemoCloudClient : ICloudClient
     }
     public virtual async Task<YuWangItem> UploadAsync(ulong disk, ulong parent, Operation op, Stream snapshot, Action<ulong> rememberId, Action<UploadAttempt> rememberAttempt, Action<UploadProgress>? progress, CancellationToken ct)
     {
-        if (op.NewRemoteId != 0 && Items.TryGetValue(op.NewRemoteId, out var recovered)) return Remote(recovered);
+        if (op.NewRemoteId != 0 && Items.TryGetValue(op.NewRemoteId, out var recovered))
+        {
+            if (!op.RunVerification) throw new UploadVerificationPendingException(Remote(recovered), true);
+            var hash = await HashAsync(new Entry { RemoteId = recovered.Id, Name = recovered.Name }, ct);
+            if (hash.Hash != op.SnapshotHash) throw new ConflictException("上传内容未通过校验。");
+            if (op.OldRemoteId != 0) Items.TryRemove(op.OldRemoteId, out _);
+            return Remote(recovered);
+        }
         var previous = Items.Values.Where(i => i.Parent == parent).Select(i => i.Id).ToArray();
         rememberAttempt(new(previous, true));
         using var stream = new MemoryStream(); await snapshot.CopyToAsync(stream, ct); var data = stream.ToArray();
         progress?.Invoke(new(UploadStage.Uploading, data.Length, data.Length, data.Length));
         var item = new Item(_next++, parent, op.Name, false, data, DateTime.UtcNow); Items[item.Id] = item;
         rememberAttempt(new(previous, true, item.Id)); rememberId(item.Id);
+        if (!op.RunVerification) throw new UploadVerificationPendingException(Remote(item), op.OldRemoteId != 0);
         progress?.Invoke(new(UploadStage.Verifying, data.Length, data.Length, data.Length, data.Length));
-        if (op.OldRemoteId != 0) Items.Remove(op.OldRemoteId);
+        if (op.OldRemoteId != 0) Items.TryRemove(op.OldRemoteId, out _);
         return Remote(item);
     }
     public virtual Task<bool> RenameAsync(ulong disk, ulong parent, ulong id, bool directory, string name, ulong? targetParent, CancellationToken ct)
@@ -60,7 +69,7 @@ public class DemoCloudClient : ICloudClient
     {
         var ids = new HashSet<ulong> { id };
         while (true) { var n = ids.Count; ids.UnionWith(Items.Values.Where(i => ids.Contains(i.Parent)).Select(i => i.Id)); if (n == ids.Count) break; }
-        foreach (var item in ids) Items.Remove(item); return Task.FromResult(true);
+        foreach (var item in ids) Items.TryRemove(item, out _); return Task.FromResult(true);
     }
     public void Dispose() { }
 }

@@ -93,4 +93,6 @@ jobs:
           path: |
             artifacts/YuWangSync-macOS-arm64-preview.zip
             artifacts/YuWangSync-macOS-arm64-preview.zip.sha256
+            artifacts/YuWangSync-macOS-arm64-preview.dmg
+            artifacts/YuWangSync-macOS-arm64-preview.dmg.sha256
           retention-days: 7

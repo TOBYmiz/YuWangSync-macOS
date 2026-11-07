@@ -123,6 +123,7 @@ public sealed partial class Workspace
 
     public async Task<IReadOnlyList<Guid>> ImportAsync(Guid parentId, IEnumerable<string> paths, CancellationToken ct = default)
     {
+        using var foreground = BeginForegroundTransfer();
         await _planning.WaitAsync(ct);
         var created = new List<Guid>();
         try
@@ -235,7 +236,7 @@ public sealed partial class Workspace
         else if (entry.RemoteMissing) throw new ConflictException("原条目已不存在，不能继续此操作。");
         string? hash = null;
         if (op.Kind == OperationKind.Upload && entry.RemoteId != 0)
-            hash = (await WithCloudAsync(entry.AccountId, (c, t) => c.HashAsync(entry.RemoteId, t), ct)).Hash;
+            hash = (await WithCloudAsync(entry.AccountId, (c, t) => c.HashAsync(entry, t), ct)).Hash;
         if (entry.IsDirectory && op.Kind is OperationKind.Delete or OperationKind.Move) await CacheSubtreeAsync(entry.Id, ct);
         Store.Save(operations: [op with { EntryId = entry.Id, State = OperationState.Queued, Error = null, RetryAfter = null,
             BaselineStamp = entry.RemoteStamp, BaselineHash = hash ?? op.BaselineHash, Collision = CollisionChoice.Replace,

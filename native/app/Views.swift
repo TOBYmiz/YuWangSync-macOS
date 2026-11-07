@@ -46,10 +46,10 @@ struct RootView: View {
                 ForEach(model.sidebarNodes) { node in
                     if node.id.hasPrefix("container:") {
                         Section(node.title) {
-                            OutlineGroup(node.children ?? [], children: \.children) { child in Label(child.title, systemImage: child.symbol).tag(child.id) }
+                            ForEach(node.children ?? []) { child in SidebarBranch(model: model, node: child) }
                         }
                     } else {
-                        OutlineGroup([node], children: \.children) { child in Label(child.title, systemImage: child.symbol).tag(child.id) }
+                        SidebarBranch(model: model, node: node)
                     }
                 }
             }.listStyle(.sidebar)
@@ -159,6 +159,39 @@ struct RootView: View {
     }
 }
 
+struct SidebarBranch: View {
+    @ObservedObject var model: AppModel
+    let node: SidebarNode
+    @State private var expanded = false
+    @State private var loading = false
+    var body: some View {
+        if node.unloaded || !(node.children ?? []).isEmpty {
+            DisclosureGroup(isExpanded: $expanded) {
+                ForEach(node.children ?? []) { child in SidebarBranch(model: model, node: child) }
+                if node.unloaded {
+                    if loading {
+                        HStack { ProgressView().controlSize(.small); Text("正在加载…") }.foregroundStyle(.secondary)
+                    } else {
+                        Button("加载子目录") { load() }.buttonStyle(.plain).foregroundStyle(.secondary)
+                    }
+                }
+            } label: { Label(node.title, systemImage: node.symbol) }
+            .tag(node.id)
+            .onChange(of: expanded) { _, value in if value && node.unloaded { load() } }
+        } else {
+            Label(node.title, systemImage: node.symbol).tag(node.id)
+        }
+    }
+    private func load() {
+        guard !loading else { return }; loading = true
+        Task { @MainActor in
+            defer { loading = false }
+            do { _ = try await model.send("loadFolder", ["folderId": node.id]) }
+            catch { model.errorMessage = error.localizedDescription }
+        }
+    }
+}
+
 struct TaskPane: View {
     @ObservedObject var model: AppModel
     var body: some View {
@@ -178,6 +211,7 @@ struct TaskPane: View {
                 Button("确认继续…") { model.overwriteTask() }
                 Button("另存云端副本…") { model.keepBothTask() }.disabled(model.selectedOperation?.kind != "upload")
                 Menu("更多") {
+                    Button("立即下载校验") { model.verifyTaskNow() }.disabled(model.selectedOperation?.state != "awaitingVerification")
                     Button("导出待传内容…") { model.exportTask() }.disabled(model.selectedOperation?.snapshotPath == nil)
                     Button("关联已创建目录…") { model.linkFolderTask() }.disabled(model.selectedOperation?.kind != "createFolder")
                     Button("取消任务…") { model.cancelTask() }
@@ -313,6 +347,15 @@ struct SettingsView: View {
                 }
             }
             Section("同步") {
+                Toggle("上传文件后下载校验", isOn: Binding(get: { model.state?.settings.verifyAfterUpload ?? true }, set: { value in
+                    model.perform { _ = try await model.send("setVerification", ["verifyAfterUpload": value]) }
+                }))
+                Toggle("使用数据流量/热点时启用", isOn: Binding(get: { model.state?.settings.verifyOnExpensiveNetwork ?? false }, set: { value in
+                    model.perform { _ = try await model.send("setVerification", ["verifyOnExpensiveNetwork": value]) }
+                })).padding(.leading, 20).disabled(model.state?.settings.verifyAfterUpload != true)
+                Text("校验在空闲时进行，遇到新传输会暂停。覆盖备份及未确认结果保留至必要校验完成。").font(.caption).foregroundStyle(.secondary)
+                Text(model.state?.networkCost == "expensive" ? "当前网络：系统识别为数据流量/热点" : model.state?.networkCost == "unmetered" ? "当前网络：普通网络" : "当前网络类型未知，暂缓自动校验")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("暂停后台同步", isOn: Binding(get: { model.state?.paused ?? false }, set: { value in model.perform { _ = try await model.send("pause", ["value": value]) } }))
                 Toggle("离线模式", isOn: Binding(get: { model.state?.manualOffline ?? false }, set: { value in model.perform { _ = try await model.send("offline", ["value": value]) } }))
                 LabeledContent("目录缓存", value: "30 分钟；⌘R 直接刷新云端")
@@ -329,7 +372,7 @@ struct SettingsView: View {
                 }
                 Button("打开数据目录") { if let path = model.state?.dataDirectory { NSWorkspace.shared.open(URL(fileURLWithPath: path)) } }
             }
-            Section { LabeledContent("版本", value: model.state?.version ?? "0.1.0"); Text("macOS 原生界面预览版").foregroundStyle(.secondary) }
-        }.formStyle(.grouped).padding().frame(width: 540, height: 600)
+            Section { LabeledContent("版本", value: model.state?.version ?? "0.1.0-preview.2"); Text("macOS 原生界面预览版").foregroundStyle(.secondary) }
+        }.formStyle(.grouped).padding().frame(width: 540, height: 680)
     }
 }

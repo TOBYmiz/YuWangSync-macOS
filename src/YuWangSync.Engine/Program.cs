@@ -40,6 +40,8 @@ public sealed class EngineHost : IAsyncDisposable
     private readonly SemaphoreSlim _output = new(1, 1), _loginGate = new(1, 1);
     private readonly CancellationTokenSource _done = new();
     private CancellationTokenSource? _transfer, _loginStop;
+    private CancellationTokenSource? _treeStop;
+    private Task _treePreload = Task.CompletedTask;
     private ICloudClient? _login;
     private Account? _loginAccount;
     private string? _loginPassword;
@@ -89,6 +91,7 @@ public sealed class EngineHost : IAsyncDisposable
     }
     private async Task LoadAccountAsync()
     {
+        await StopTreePreloadAsync();
         if (!_workspace.Offline)
             try { await _workspace.RefreshTreeAsync(_done.Token); } catch (IOException) { }
         if (_workspace.ActiveAccount is { } account && _workspace.ProjectedEntries(account.Id).FirstOrDefault(e => e.IsDiskRoot) is { } root)
@@ -96,6 +99,23 @@ public sealed class EngineHost : IAsyncDisposable
             lock (_stateLock) _folder = root.Id;
             try { await _workspace.BrowseAsync(root.Id, ct: _done.Token); } catch (IOException) { }
         }
+        if (!_workspace.Offline && _workspace.ActiveAccount is not null)
+        {
+            _treeStop = CancellationTokenSource.CreateLinkedTokenSource(_done.Token);
+            var token = _treeStop.Token;
+            _treePreload = Task.Run(async () =>
+            {
+                try { await _workspace.PreloadDirectoriesAsync(token); }
+                catch (OperationCanceledException) { }
+                catch (Exception error) when (error is IOException or HttpRequestException)
+                { _workspace.Log?.Invoke("目录预加载未完成，可展开节点重试。"); }
+            });
+        }
+    }
+    private async Task StopTreePreloadAsync()
+    {
+        _treeStop?.Cancel(); await _treePreload;
+        _treeStop?.Dispose(); _treeStop = null;
     }
     public object State()
     {
@@ -103,12 +123,13 @@ public sealed class EngineHost : IAsyncDisposable
         var all = _workspace.ActiveAccount is { } a ? _workspace.ProjectedEntries(a.Id) : [];
         return new
         {
-            version = "0.1.0", demo = _demo, accounts = _workspace.Store.Accounts(), activeAccount = _workspace.ActiveAccount,
+            version = YuWangCloudSync.Core.ProductVersion.Current, demo = _demo, accounts = _workspace.Store.Accounts(), activeAccount = _workspace.ActiveAccount,
             folderId = folder, entries = all.Where(e => e.IsDirectory || e.ParentId == folder),
             tree = _workspace.ActiveAccount is { } account ? _workspace.Store.Tree(account.Id) : [],
             operations = _workspace.Store.Operations(_workspace.ActiveAccount?.Id).OrderBy(o => o.IsTerminal).ThenByDescending(o => o.Created).Take(500),
             offline = _workspace.Offline, manualOffline = _workspace.ManualOffline, paused = _workspace.Paused,
-            connectionStatus = _workspace.ConnectionStatus, dataDirectory = _files.DataRoot
+            connectionStatus = _workspace.ConnectionStatus, dataDirectory = _files.DataRoot,
+            settings = _workspace.Settings, networkCost = _workspace.NetworkCost
         };
     }
     private void ScheduleState() { if (_running && !_disposed) _stateTimer.Change(100, Timeout.Infinite); }
@@ -191,16 +212,21 @@ public sealed class EngineHost : IAsyncDisposable
             case "browse":
                 var folder = Id(p, "folderId"); lock (_stateLock) _folder = folder;
                 await _workspace.BrowseAsync(folder, Flag(p, "force"), _done.Token); return State();
+            case "loadFolder":
+                await _workspace.BrowseAsync(Id(p, "folderId"), ct: _done.Token, probeSizes: false); return State();
             case "refresh":
                 if (_workspace.Offline && !_workspace.ManualOffline) await _workspace.ReconnectAsync(_done.Token);
                 Guid? current; lock (_stateLock) current = _folder;
                 if (current is { } root) await _workspace.BrowseAsync(root, true, _done.Token); else await _workspace.RefreshTreeAsync(_done.Token);
                 return State();
-            case "open": return new { path = await _workspace.OpenAsync(Id(p, "entryId"), BeginTransfer()) };
-            case "download": return new { errors = await _workspace.DownloadRecursiveAsync(p.GetProperty("ids").EnumerateArray().Select(x => x.GetGuid()).ToArray(), BeginTransfer()) };
+            case "open":
+                using (var foreground = _workspace.BeginForegroundTransfer()) return new { path = await _workspace.OpenAsync(Id(p, "entryId"), BeginTransfer()) };
+            case "download":
+                using (var foreground = _workspace.BeginForegroundTransfer()) return new { errors = await _workspace.DownloadRecursiveAsync(p.GetProperty("ids").EnumerateArray().Select(x => x.GetGuid()).ToArray(), BeginTransfer()) };
             case "cancelTransfer": _transfer?.Cancel(); return new { };
             case "export":
-                await _workspace.ExportAsync(Id(p, "entryId"), Text(p, "destination"), BeginTransfer(), Flag(p, "overwrite")); return new { };
+                using (var foreground = _workspace.BeginForegroundTransfer())
+                { await _workspace.ExportAsync(Id(p, "entryId"), Text(p, "destination"), BeginTransfer(), Flag(p, "overwrite")); return new { }; }
             case "import":
                 return new { operationIds = await _workspace.ImportAsync(Id(p, "parentId"), p.GetProperty("paths").EnumerateArray().Select(x => x.GetString()!).ToArray(), BeginTransfer()) };
             case "createFolder": return new { entryId = _workspace.CreateFolder(Id(p, "parentId"), Text(p, "name")) };
@@ -215,6 +241,15 @@ public sealed class EngineHost : IAsyncDisposable
                 if (_workspace.Offline && !_workspace.ManualOffline) await _workspace.ReconnectAsync(_done.Token);
                 _workspace.Retry(Id(p, "operationId")); return new { };
             case "cancel": _workspace.Cancel(Id(p, "operationId")); return new { };
+            case "verifyUpload": _workspace.VerifyUploadNow(Id(p, "operationId")); return new { };
+            case "setVerification":
+                var settings = _workspace.Settings;
+                if (p.TryGetProperty("verifyAfterUpload", out var verify)) settings = settings with { VerifyAfterUpload = verify.GetBoolean() };
+                if (p.TryGetProperty("verifyOnExpensiveNetwork", out var expensive)) settings = settings with { VerifyOnExpensiveNetwork = expensive.GetBoolean() };
+                _workspace.SetSettings(settings); return State();
+            case "networkCost":
+                if (!Enum.TryParse<NetworkCost>(Text(p, "value"), true, out var cost) || !Enum.IsDefined(cost)) throw new ArgumentException("未知的网络费用类型。");
+                _workspace.SetNetworkCost(cost); return new { };
             case "resolve":
                 if (!Enum.TryParse<CollisionChoice>(Text(p, "choice"), true, out var choice)) throw new ArgumentException("无效的冲突选择。");
                 await _workspace.ResolveAsync(Id(p, "operationId"), choice, p.TryGetProperty("name", out var n) ? n.GetString() : null, _done.Token); return new { };
@@ -271,6 +306,7 @@ public sealed class EngineHost : IAsyncDisposable
     {
         if (_disposed) return; _disposed = true; _running = false; _stateTimer.Dispose();
         _workspace.Changed -= ScheduleState; _transfer?.Cancel(); _loginStop?.Cancel(); _login?.Dispose();
+        await StopTreePreloadAsync();
         await _workspace.DisposeAsync();
     }
 }

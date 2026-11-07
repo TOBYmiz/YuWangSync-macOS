@@ -11,7 +11,11 @@ public sealed partial class Workspace : IAsyncDisposable
     private readonly ISecretStore _secrets;
     private readonly IFileSnapshotProvider _snapshots;
     private readonly Func<Account, string, ICloudClient> _factory;
-    private readonly SemaphoreSlim _network = new(1, 1);
+    private const int CloudConcurrency = 6;
+    private readonly SemaphoreSlim _network = new(CloudConcurrency, CloudConcurrency);
+    private readonly SemaphoreSlim _accountChanges = new(1, 1), _execution = new(1, 1);
+    private readonly List<CancellationTokenSource> _retiredAccounts = [];
+    private readonly object _metadataGate = new();
     private readonly SemaphoreSlim _planning = new(1, 1);
     private readonly CancellationTokenSource _stop = new();
     private CancellationTokenSource _accountStop = new();
@@ -19,8 +23,15 @@ public sealed partial class Workspace : IAsyncDisposable
     private ICloudClient? _client;
     private bool _credentialsUnavailable;
     private Task? _worker;
+    private volatile bool _verifying;
+    private int _foregroundTransfers;
+    public SyncSettings Settings { get; private set; }
+    public NetworkCost NetworkCost { get; private set; } = NetworkCost.Unknown;
+    private bool VerificationAllowed => Settings.VerifyAfterUpload
+        && (NetworkCost == NetworkCost.Unmetered || Settings.VerifyOnExpensiveNetwork && NetworkCost == NetworkCost.Expensive);
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> _opened = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> _localLocks = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> _directoryLocks = new();
     private readonly Dictionary<Guid, (long Length, DateTime Written, DateTimeOffset Observed)> _observations = [];
     private FileSystemWatcher? _watcher;
     private volatile bool _scanRequested = true;
@@ -36,18 +47,51 @@ public sealed partial class Workspace : IAsyncDisposable
     public Workspace(IOperationStore store, LocalFiles files, ISecretStore secrets, IFileSnapshotProvider snapshots,
         Func<Account, string, ICloudClient>? factory = null)
     {
-        Store = store; Files = files; _secrets = secrets; _snapshots = snapshots;
+        Store = store; Files = files; _secrets = secrets; _snapshots = snapshots; Settings = store.Settings;
         _factory = factory ?? ((a, p) => new CloudClient(a, p, message => Log?.Invoke(message)));
         var working = Path.Combine(files.DataRoot, "working"); Directory.CreateDirectory(working);
         _watcher = new(working) { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName };
-        _watcher.Changed += (_, _) => _scanRequested = true;
-        _watcher.Created += (_, _) => _scanRequested = true;
-        _watcher.Renamed += (_, _) => _scanRequested = true;
-        _watcher.Error += (_, _) => _scanRequested = true;
+        _watcher.Changed += (_, _) => RequestEditScan();
+        _watcher.Created += (_, _) => RequestEditScan();
+        _watcher.Renamed += (_, _) => RequestEditScan();
+        _watcher.Error += (_, _) => RequestEditScan();
         _watcher.EnableRaisingEvents = true;
     }
     public void Start() => _worker ??= Task.Run(WorkerAsync);
-    private void Notify() => Changed?.Invoke();
+    private void RequestEditScan() { _scanRequested = true; PreemptVerification(); }
+    private void Notify()
+    {
+        if (_verifying && HasReadyForegroundWork()) _currentStop?.Cancel();
+        Changed?.Invoke();
+    }
+    public void SetSettings(SyncSettings settings)
+    {
+        Store.Settings = settings; Settings = settings;
+        if (!VerificationAllowed) PreemptVerification();
+        Notify();
+    }
+    public void SetNetworkCost(NetworkCost cost)
+    { NetworkCost = cost; if (!VerificationAllowed) PreemptVerification(); Notify(); }
+    public void PreemptVerification() { if (_verifying) _currentStop?.Cancel(); }
+    private bool HasReadyForegroundWork()
+    {
+        var operations = Store.Operations(ActiveAccount?.Id);
+        return operations.Any(o => o.State is OperationState.Queued or OperationState.Uncertain
+            && (o.RetryAfter is null || o.RetryAfter <= DateTimeOffset.UtcNow)
+            && o.Dependencies.All(id => operations.Any(dependency => dependency.Id == id && dependency.State == OperationState.Completed)));
+    }
+    public void VerifyUploadNow(Guid id)
+    {
+        var op = Store.GetOperation(id) ?? throw new IOException("任务不存在。");
+        if (op.AccountId != ActiveAccount?.Id || op.State != OperationState.AwaitingVerification) throw new IOException("该任务当前不在等待校验。");
+        Store.UpdateOperation(id, current => current with { VerificationRequested = true, RetryAfter = null }); Notify();
+    }
+    private sealed class ForegroundLease(Workspace owner) : IDisposable
+    { public void Dispose() => Interlocked.Decrement(ref owner._foregroundTransfers); }
+    public IDisposable BeginForegroundTransfer()
+    {
+        Interlocked.Increment(ref _foregroundTransfers); PreemptVerification(); return new ForegroundLease(this);
+    }
     public ICloudClient CreateLoginClient(Account account, string password) => _factory(account, password);
     public async Task CompleteLoginAsync(Account account, string password, ICloudClient client, CancellationToken ct = default)
     {
@@ -76,19 +120,32 @@ public sealed partial class Workspace : IAsyncDisposable
     }
     private async Task ActivateClientAsync(Account account, ICloudClient client, bool online, CancellationToken ct)
     {
-        _accountStop.Cancel(); _currentStop?.Cancel();
-        await _network.WaitAsync(ct);
+        await SuspendCloudAsync(ct);
         try
         {
-            _client?.Dispose(); _accountStop.Dispose(); _accountStop = new();
+            _client?.Dispose(); _retiredAccounts.Add(_accountStop); _accountStop = new();
             _client = client; ActiveAccount = account; Offline = !online;
             _credentialsUnavailable = false;
             Store.ActiveAccountId = account.Id;
             ConnectionStatus = online ? "在线" : "离线缓存"; _scanRequested = true;
         }
-        finally { _network.Release(); }
+        finally { ResumeCloud(); }
         Notify();
     }
+    // Cancel the old account, then drain every concurrent request before disposing
+    // its client. Ordinary browsing and transfers only occupy one slot each.
+    private async Task SuspendCloudAsync(CancellationToken ct)
+    {
+        await _accountChanges.WaitAsync(ct);
+        var acquired = 0;
+        try
+        {
+            _accountStop.Cancel(); _currentStop?.Cancel();
+            for (; acquired < CloudConcurrency; acquired++) await _network.WaitAsync();
+        }
+        catch { if (acquired > 0) _network.Release(acquired); _accountChanges.Release(); throw; }
+    }
+    private void ResumeCloud() { _network.Release(CloudConcurrency); _accountChanges.Release(); }
     public async Task RemoveAccountAsync(Account account, CancellationToken ct = default)
     {
         foreach (var entry in Store.Entries(account.Id).Where(e => e.LocalPath is not null))
@@ -98,9 +155,9 @@ public sealed partial class Workspace : IAsyncDisposable
             throw new InvalidOperationException("该账号仍有待办或本地修改，请先处理或导出。");
         if (account.Id == ActiveAccount?.Id)
         {
-            _accountStop.Cancel(); _currentStop?.Cancel(); await _network.WaitAsync(ct);
+            await SuspendCloudAsync(ct);
             try { Store.RemoveAccount(account.Id); Store.ActiveAccountId = null; _client?.Dispose(); _client = null; ActiveAccount = null; Offline = true; }
-            finally { _network.Release(); }
+            finally { ResumeCloud(); }
         }
         else Store.RemoveAccount(account.Id);
         await _secrets.DeleteAsync(account.Id + ":password", ct);
@@ -111,31 +168,35 @@ public sealed partial class Workspace : IAsyncDisposable
     { ManualOffline = value; if (value) { Offline = true; _currentStop?.Cancel(); ConnectionStatus = "离线模式"; } Notify(); }
     public async Task ReconnectAsync(CancellationToken ct = default)
     {
-        if (ManualOffline || _client is null) return;
+        if (ManualOffline || _client is null || ActiveAccount is not { } currentAccount) return;
         if (_credentialsUnavailable && ActiveAccount is { } account) { await ActivateAsync(account, ct); return; }
-        await _network.WaitAsync(ct);
+        var generation = _accountStop;
         try
         {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _accountStop.Token, _stop.Token);
-            var valid = await _client.CheckSessionAsync(linked.Token);
+            var valid = await WithCloudAsync(currentAccount.Id, (c, t) => c.CheckSessionAsync(t), ct, allowOffline: true);
+            if (generation != _accountStop || generation.IsCancellationRequested || ManualOffline) return;
             Offline = !valid; ConnectionStatus = valid ? "在线" : "无法复用会话，请重新登录或稍后重连";
         }
         catch (Exception e) when (e is HttpRequestException or IOException or OperationCanceledException)
-        { Offline = true; ConnectionStatus = "连接不可用，显示离线缓存"; }
-        finally { _network.Release(); }
+        { if (generation != _accountStop || generation.IsCancellationRequested) return; Offline = true; ConnectionStatus = "连接不可用，显示离线缓存"; }
         Notify();
     }
-    private async Task<T> WithCloudAsync<T>(Guid account, Func<ICloudClient, CancellationToken, Task<T>> action, CancellationToken ct)
+    private async Task<T> WithCloudAsync<T>(Guid account, Func<ICloudClient, CancellationToken, Task<T>> action, CancellationToken ct,
+        bool allowOffline = false, bool markOffline = true)
     {
-        if (account != ActiveAccount?.Id || _client is null || ManualOffline || Offline) throw new IOException("当前离线，操作已保留在本地。");
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _accountStop.Token, _stop.Token);
+        if (account != ActiveAccount?.Id || _client is null || ManualOffline || Offline && !allowOffline) throw new IOException("当前离线，操作已保留在本地。");
+        var generation = _accountStop;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, generation.Token, _stop.Token);
         await _network.WaitAsync(linked.Token);
         try
         {
-            if (account != ActiveAccount?.Id || _client is null) throw new OperationCanceledException();
-            return await action(_client, linked.Token);
+            if (account != ActiveAccount?.Id || _client is null || generation != _accountStop) throw new OperationCanceledException();
+            var result = await action(_client, linked.Token);
+            linked.Token.ThrowIfCancellationRequested();
+            return result;
         }
-        catch (HttpRequestException) { Offline = true; ConnectionStatus = "连接中断，待办已保留"; throw; }
+        catch (HttpRequestException)
+        { if (markOffline && generation == _accountStop) { Offline = true; ConnectionStatus = "连接中断，待办已保留"; } throw; }
         finally { _network.Release(); }
     }
     public async Task RefreshTreeAsync(CancellationToken ct = default)
@@ -180,34 +241,97 @@ public sealed partial class Workspace : IAsyncDisposable
             .OrderByDescending(e => e.IsDirectory).ThenBy(e => e.Name, StringComparer.CurrentCulture).ToArray();
     }
     public IReadOnlyList<Entry> Children(Guid parent) => ActiveAccount is { } a ? ProjectedEntries(a.Id).Where(e => e.ParentId == parent).ToArray() : [];
-    public async Task BrowseAsync(Guid parentId, bool force = false, CancellationToken ct = default)
+    public async Task BrowseAsync(Guid parentId, bool force = false, CancellationToken ct = default, bool probeSizes = true)
     {
-        var parent = Store.GetEntry(parentId) ?? throw new IOException("目录不存在。");
-        if (!parent.IsDirectory || parent.RemoteId == 0 && !parent.IsDiskRoot) return;
-        if (!force && parent.LastListed is { } listed && DateTimeOffset.UtcNow - listed < TimeSpan.FromMinutes(30)) return;
-        if (Offline || ManualOffline) { Notify(); return; }
-        var result = await WithCloudAsync(parent.AccountId, (c, t) => c.ListAsync(parent.DiskId, parent.RemoteId, t), ct);
-        ApplyListing(parent, result); Notify();
+        var gate = _directoryLocks.GetOrAdd(parentId, _ => new(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            var parent = Store.GetEntry(parentId) ?? throw new IOException("目录不存在。");
+            if (!parent.IsDirectory || parent.RemoteId == 0 && !parent.IsDiskRoot) return;
+            if (Offline || ManualOffline) { Notify(); return; }
+            if (force || parent.LastListed is not { } listed || DateTimeOffset.UtcNow - listed >= TimeSpan.FromMinutes(30))
+            {
+                var result = await WithCloudAsync(parent.AccountId, (c, t) => c.ListAsync(parent.DiskId, parent.RemoteId, t), ct);
+                ApplyListing(parent, result); Notify();
+            }
+        }
+        finally { gate.Release(); }
+        if (probeSizes && !Offline && !ManualOffline) await RefreshSizesAsync(parentId, ct);
     }
     private void ApplyListing(Entry parent, FolderListingResult result)
     {
+        lock (_metadataGate) ApplyListingCore(parent, result);
+    }
+    private void ApplyListingCore(Entry parent, FolderListingResult result)
+    {
         if (!result.IsValidPage) throw new IOException("目录结果不完整。");
         var existing = Store.Entries(parent.AccountId);
+        var uploading = Store.Operations(parent.AccountId).Where(o => o.Kind == OperationKind.Upload
+            && o.State == OperationState.Running && o.MutationStarted && o.TargetParentId == parent.Id).ToArray();
         var changed = new List<Entry>();
         foreach (var item in result.Items)
         {
-            var entry = existing.FirstOrDefault(e => e.DiskId == parent.DiskId && e.RemoteId == item.Id && e.IsDirectory == item.IsFolder && !e.IsDiskRoot)
-                ?? new Entry { AccountId = parent.AccountId, DiskId = parent.DiskId, RemoteId = item.Id, IsDirectory = item.IsFolder };
-            changed.Add(entry with { ParentId = parent.Id, Name = item.Name, Size = item.Size, UploadTime = item.UploadTime, RemoteStamp = Entry.Stamp(item), RemoteMissing = false });
+            var entry = existing.FirstOrDefault(e => e.DiskId == parent.DiskId && e.RemoteId == item.Id && e.IsDirectory == item.IsFolder && !e.IsDiskRoot);
+            // A published upload is still being hash-verified. Keep its existing
+            // local queue identity rather than adding a second entity during a refresh.
+            if (entry is null && !item.IsFolder && uploading.Any(o =>
+                o.Name.Equals(item.Name, StringComparison.OrdinalIgnoreCase)
+                || System.Text.RegularExpressions.Regex.IsMatch(item.Name, "^" + System.Text.RegularExpressions.Regex.Escape(Path.GetFileNameWithoutExtension(o.Name))
+                    + @"_[0-9]{6}" + System.Text.RegularExpressions.Regex.Escape(Path.GetExtension(o.Name)) + "$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))) continue;
+            entry ??= new Entry { AccountId = parent.AccountId, DiskId = parent.DiskId, RemoteId = item.Id, IsDirectory = item.IsFolder };
+            var stamp = Entry.Stamp(item);
+            Entry Update(Entry current) => current with { ParentId = parent.Id, Name = item.Name, DeclaredSize = item.Size,
+                Size = current.SizeStamp == stamp ? current.Size : item.Size,
+                SizeStamp = current.SizeStamp == stamp ? stamp : null,
+                UploadTime = item.UploadTime, RemoteStamp = stamp, RemoteMissing = false };
+            if (existing.Any(e => e.Id == entry.Id)) Store.UpdateEntry(entry.Id, Update);
+            else Store.Save(entries: [Update(entry)]);
+            changed.Add(entry);
         }
-        changed.AddRange(existing.Where(e => e.ParentId == parent.Id && e.RemoteId != 0 && changed.All(c => c.Id != e.Id))
-            .Select(e => e with { RemoteMissing = true }));
-        var latest = Store.GetEntry(parent.Id)!;
-        changed.Add(latest with { LastListed = DateTimeOffset.UtcNow, Permission = result.Permission });
-        Store.Save(entries: changed);
+        foreach (var missing in existing.Where(e => e.ParentId == parent.Id && e.RemoteId != 0 && changed.All(c => c.Id != e.Id)))
+            Store.UpdateEntry(missing.Id, current => current.ParentId == parent.Id && current.RemoteId == missing.RemoteId ? current with { RemoteMissing = true } : current);
+        Store.UpdateEntry(parent.Id, current => current with { LastListed = DateTimeOffset.UtcNow, Permission = result.Permission });
+    }
+    private async Task RefreshSizesAsync(Guid parent, CancellationToken ct)
+    {
+        var entries = Children(parent).Where(e => !e.IsDirectory && e.RemoteId != 0 && e.SizeStamp != e.RemoteStamp).ToArray();
+        await Parallel.ForEachAsync(entries, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct }, async (entry, token) =>
+        {
+            try
+            {
+                var size = await WithCloudAsync(entry.AccountId, (c, t) => c.SizeAsync(entry, t), token, markOffline: false);
+                if (size is null) return;
+                Store.UpdateEntry(entry.Id, current => current.RemoteStamp == entry.RemoteStamp
+                    ? current with { Size = size, SizeStamp = entry.RemoteStamp } : current);
+                Notify();
+            }
+            catch (Exception error) when (error is HttpRequestException or IOException)
+            { Log?.Invoke("文件大小暂未确认，保留声明值：" + SafeError(error)); }
+        });
+    }
+    public async Task PreloadDirectoriesAsync(CancellationToken ct = default)
+    {
+        var account = ActiveAccount ?? throw new InvalidOperationException("请先选择账号。");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _accountStop.Token, _stop.Token);
+        var queue = new Queue<Guid>(ProjectedEntries(account.Id).Where(e => e.IsDiskRoot).Select(e => e.Id));
+        var visited = new HashSet<Guid>();
+        while (queue.TryDequeue(out var id))
+        {
+            linked.Token.ThrowIfCancellationRequested();
+            if (!visited.Add(id)) continue;
+            try
+            {
+                await BrowseAsync(id, ct: linked.Token, probeSizes: false);
+                foreach (var child in Children(id).Where(e => e.IsDirectory)) queue.Enqueue(child.Id);
+            }
+            catch (Exception error) when (error is IOException or HttpRequestException)
+            { Log?.Invoke("目录预加载稍后可重试：" + SafeError(error)); }
+        }
     }
     public async Task<string> EnsureLocalAsync(Guid id, bool keepOffline = false, CancellationToken ct = default)
     {
+        using var foreground = BeginForegroundTransfer();
         var gate = _localLocks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1)); await gate.WaitAsync(ct);
         try { return await EnsureLocalCoreAsync(id, keepOffline, ct); }
         finally { gate.Release(); }
@@ -245,7 +369,7 @@ public sealed partial class Workspace : IAsyncDisposable
             if (File.Exists(destination) && entry.LocalPath is not null && await LocalFiles.HashAsync(destination, ct) != entry.ContentHash)
                 throw new ConflictException("下载期间本地副本已被编辑，未覆盖。");
             File.Move(part, destination, true);
-            Store.UpdateEntry(id, e => e with { LocalPath = destination, Size = receipt.Length, ContentHash = receipt.Hash,
+            Store.UpdateEntry(id, e => e with { LocalPath = destination, Size = receipt.Length, SizeStamp = entry.RemoteStamp, ContentHash = receipt.Hash,
                 DownloadStamp = entry.RemoteStamp, Dirty = false, KeepOffline = e.KeepOffline || keepOffline, LastAccess = DateTimeOffset.UtcNow });
             Notify(); return destination;
         }
@@ -330,8 +454,14 @@ public sealed partial class Workspace : IAsyncDisposable
     {
         _stop.Cancel(); _accountStop.Cancel(); _currentStop?.Cancel(); _watcher?.Dispose();
         if (_worker is not null) try { await _worker; } catch (OperationCanceledException) { }
-        await _network.WaitAsync();
-        try { _client?.Dispose(); } finally { _network.Release(); }
-        _accountStop.Dispose(); _stop.Dispose(); Store.Dispose();
+        await _execution.WaitAsync();
+        try
+        {
+            await SuspendCloudAsync(CancellationToken.None);
+            try { _client?.Dispose(); } finally { ResumeCloud(); }
+            _accountStop.Dispose(); foreach (var retired in _retiredAccounts) retired.Dispose();
+            _stop.Dispose(); Store.Dispose();
+        }
+        finally { _execution.Release(); }
     }
 }

@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Net;
 using YuWangCloudSync.Models;
+using YuWangSync.Core;
 
 namespace YuWangCloudSync.Net;
 
@@ -35,7 +36,8 @@ public sealed partial class YuWangClient
     {
         ValidateRemoteName(name);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetimeToken);
-        await _folderContextGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        using var mutation = await EnterMutationAsync(linked.Token).ConfigureAwait(false);
+        await WaitForFolderContextAsync(linked.Token).ConfigureAwait(false);
         try
         {
             var html = await FetchWritableFolderCoreAsync(disk, parent).ConfigureAwait(false)
@@ -88,7 +90,8 @@ public sealed partial class YuWangClient
         if (!source.CanSeek || !source.CanRead || sha256.Length != 32)
             throw new ArgumentException("上传需要可寻址的稳定文件快照及 SHA-256。");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetimeToken);
-        await _folderContextGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        using var mutation = await EnterMutationAsync(linked.Token).ConfigureAwait(false);
+        await WaitForFolderContextAsync(linked.Token).ConfigureAwait(false);
         try
         {
             return await UploadNewFileCoreAsync(disk, folder, name, source, modifiedUtc, sha256, linked.Token, progress,
@@ -119,8 +122,10 @@ public sealed partial class YuWangClient
             var sameName = before.Where(i => i.Name.Equals(name, StringComparison.OrdinalIgnoreCase)).ToArray();
             if (sameName.Length != 0)
             {
+                if (DeferPostUploadVerification && sameName.Length == 1 && !sameName[0].IsFolder)
+                    throw new UploadVerificationPendingException(sameName[0], true);
                 if (sameName.Length == 1 && !sameName[0].IsFolder
-                    && await VerifyRemoteContentAsync(sameName[0].Id, source.Length, sha256, linked.Token, progress).ConfigureAwait(false))
+                    && await VerifyRemoteContentAsync(sameName[0], source.Length, sha256, linked.Token, progress).ConfigureAwait(false))
                 {
                     ReportUploadProgress(progress, new(UploadStage.Finalizing, source.Length, source.Length, source.Length, source.Length));
                     return sameName[0];
@@ -187,7 +192,7 @@ public sealed partial class YuWangClient
                     rememberAttempt?.Invoke(attempt);
                 }
                 using var request = MakeRequest(HttpMethod.Post, endpoint, content);
-                using var response = await SendAsync(request, _downloadTimeout, ct: linked.Token).ConfigureAwait(false);
+                using var response = await WithoutFolderContextAsync(() => SendAsync(request, _downloadTimeout, ct: linked.Token)).ConfigureAwait(false);
                 EnsureUploadResponseStatus(response);
                 using var reply = ParseUploadReply(await response.Content.ReadAsStringAsync(linked.Token).ConfigureAwait(false));
                 var acknowledged = ReadUploadOffset(reply);
@@ -197,13 +202,13 @@ public sealed partial class YuWangClient
                 ReportUploadProgress(progress, new(UploadStage.Uploading, source.Length, position, position, ResumedBytes: resumed));
             }
             return await WaitForUploadedFileAsync(disk, folder, name, source.Length, sha256,
-                attempt, rememberAttempt, linked.Token, progress, resumed).ConfigureAwait(false);
+                attempt, rememberAttempt, linked.Token, progress, resumed, verificationRequired: resumed > 0).ConfigureAwait(false);
         }
     }
 
     private async Task<YuWangItem> WaitForUploadedFileAsync(ulong disk, ulong folder, string name, long length,
         byte[] sha256, UploadAttempt attempt, Action<UploadAttempt>? rememberAttempt,
-        CancellationToken ct, Action<UploadProgress>? progress, long resumed)
+        CancellationToken ct, Action<UploadProgress>? progress, long resumed, bool verificationRequired = true)
     {
         const int checks = 10;
         var previous = attempt.BeforeIds.ToHashSet();
@@ -211,7 +216,8 @@ public sealed partial class YuWangClient
         // fresh metadata reads here; never request a new token or re-send the final chunk.
         for (var check = 0; check < checks; check++)
         {
-            if (check > 0) await Task.Delay(Math.Min(4000, 250 << (check - 1)), ct).ConfigureAwait(false);
+            if (check > 0) await WithoutFolderContextAsync(async () =>
+            { await Task.Delay(Math.Min(4000, 250 << (check - 1)), ct).ConfigureAwait(false); return true; }).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             var items = RequireCompleteListing(await FetchFolderHtmlCoreAsync(disk, folder, fresh: true)
                 .ConfigureAwait(false), disk, folder);
@@ -219,7 +225,7 @@ public sealed partial class YuWangClient
             var diagnostic = string.Join("; ", added.Take(3).Select(i => $"{i.Id}:{i.Name.Replace('\r', ' ').Replace('\n', ' ')}"));
             _log($"[UPLOAD] 目录确认 poll={check + 1}/{checks} items={items.Count} newItems={added.Length} disk={disk} folder={folder} added=[{diagnostic}]");
             var result = await ResolveUploadedFileAsync(disk, folder, name, length, sha256,
-                items, attempt, rememberAttempt, ct, progress, resumed).ConfigureAwait(false);
+                items, attempt, rememberAttempt, ct, progress, resumed, verificationRequired).ConfigureAwait(false);
             if (result is not null) return result;
         }
         throw new IOException("上传已被服务器确认，但等待新鲜目录列表后仍未出现可确认的文件；保留上传记录，不再次发送文件。");
@@ -227,7 +233,7 @@ public sealed partial class YuWangClient
 
     private async Task<YuWangItem?> ResolveUploadedFileAsync(ulong disk, ulong folder, string name, long length,
         byte[] sha256, IReadOnlyList<YuWangItem> items, UploadAttempt attempt,
-        Action<UploadAttempt>? rememberAttempt, CancellationToken ct, Action<UploadProgress>? progress, long resumed = 0)
+        Action<UploadAttempt>? rememberAttempt, CancellationToken ct, Action<UploadProgress>? progress, long resumed = 0, bool verificationRequired = true)
     {
         var previous = attempt.BeforeIds.ToHashSet();
         var suffixPattern = "^" + System.Text.RegularExpressions.Regex.Escape(Path.GetFileNameWithoutExtension(name))
@@ -250,8 +256,10 @@ public sealed partial class YuWangClient
         // The assigned name is not evidence of ownership/content. Require a new ID in this
         // attempt's directory delta and a full hash match before restoring the requested name.
         rememberAttempt?.Invoke(attempt with { CandidateId = candidate.Id, MayHaveCommitted = true });
-        if (!await VerifyRemoteContentAsync(candidate.Id, length, sha256, ct, progress, resumed).ConfigureAwait(false))
-            throw new IOException($"上传内容未通过完整校验 file={candidate.Id}；保留本地内容，停止重复上传。");
+        if (DeferPostUploadVerification)
+            throw new UploadVerificationPendingException(candidate, verificationRequired || candidate.Name != name);
+        if (!await VerifyRemoteContentAsync(candidate, length, sha256, ct, progress, resumed).ConfigureAwait(false))
+            throw new ConflictException($"上传内容未通过完整校验 file={candidate.Id}；保留本地内容，停止重复上传。");
         if (candidate.Name != name)
         {
             var writable = await FetchWritableFolderCoreAsync(disk, folder, fresh: true).ConfigureAwait(false)
@@ -281,7 +289,8 @@ public sealed partial class YuWangClient
         ValidateRemoteName(backupName);
         if (name.Equals(backupName, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("备份名称必须唯一。");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetimeToken);
-        await _folderContextGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        using var mutation = await EnterMutationAsync(linked.Token).ConfigureAwait(false);
+        await WaitForFolderContextAsync(linked.Token).ConfigureAwait(false);
         try
         {
             ReportUploadProgress(progress, new(UploadStage.Preparing, source.Length, 0, 0));
@@ -292,8 +301,10 @@ public sealed partial class YuWangClient
             if (old is null)
             {
                 var completed = items.Where(i => !i.IsFolder && i.Name == name).ToArray();
+                if (DeferPostUploadVerification && completed.Length == 1)
+                    throw new UploadVerificationPendingException(completed[0], true);
                 if (completed.Length == 1
-                    && await VerifyRemoteContentAsync(completed[0].Id, source.Length, sha256, linked.Token, progress).ConfigureAwait(false))
+                    && await VerifyRemoteContentAsync(completed[0], source.Length, sha256, linked.Token, progress).ConfigureAwait(false))
                 {
                     rememberNewId(completed[0].Id);
                     ReportUploadProgress(progress, new(UploadStage.Finalizing, source.Length, source.Length, source.Length, source.Length));
@@ -325,6 +336,8 @@ public sealed partial class YuWangClient
                 // then finish binding this same upload after restart instead of uploading again.
                 rememberNewId(replacement.Id);
             }
+            catch (UploadVerificationPendingException pending)
+            { throw new UploadVerificationPendingException(pending.Candidate, true); }
             catch
             {
                 if (!backupAttempted) throw;
@@ -412,29 +425,13 @@ public sealed partial class YuWangClient
         throw new IOException("上传响应缺少有效的 start 偏移。");
     }
 
-    private async Task<bool> VerifyRemoteContentAsync(ulong id, long length, byte[] expected, CancellationToken ct,
+    private async Task<bool> VerifyRemoteContentAsync(YuWangItem item, long length, byte[] expected, CancellationToken ct,
         Action<UploadProgress>? progress = null, long resumed = 0)
     {
         ReportUploadProgress(progress, new(UploadStage.Verifying, length, length, length, ResumedBytes: resumed));
-        using var request = MakeRequest(HttpMethod.Post, "/fmsFileInfoAction.do?method=downSelectFile",
-            new FormUrlEncodedContent([new KeyValuePair<string, string>("selectitemid", id.ToString(CultureInfo.InvariantCulture))]));
-        using var response = await SendAsync(request, _downloadTimeout, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetimeToken);
-        timeout.CancelAfter(_downloadTimeout);
-        await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[128 * 1024];
-        long total = 0;
-        int count;
-        while ((count = await stream.ReadAsync(buffer, timeout.Token).ConfigureAwait(false)) > 0)
-        {
-            total += count;
-            if (total > length) return false;
-            hash.AppendData(buffer, 0, count);
-            ReportUploadProgress(progress, new(UploadStage.Verifying, length, length, length, total, resumed));
-        }
-        return total == length && CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), expected);
+        var receipt = await WithoutFolderContextAsync(() => DownloadToAsync(item.Id, item.Name, item.Size, Stream.Null,
+            (total, _) => ReportUploadProgress(progress, new(UploadStage.Verifying, length, length, length, total, resumed)), ct)).ConfigureAwait(false);
+        return receipt.Length == length && CryptographicOperations.FixedTimeEquals(Convert.FromHexString(receipt.Hash), expected);
     }
 
     private void ReportUploadProgress(Action<UploadProgress>? observer, UploadProgress value)

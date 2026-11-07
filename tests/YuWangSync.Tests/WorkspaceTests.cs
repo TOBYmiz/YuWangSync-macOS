@@ -11,22 +11,36 @@ namespace YuWangSync.Tests;
 
 public sealed class TestCloud : DemoCloudClient
 {
-    public int UploadCalls, DeleteCalls, ListCalls;
+    public int UploadCalls, DeleteCalls, ListCalls, SizeCalls, HashCalls;
+    public long? DeclaredSizeOverride;
+    public ulong? FailingFolder;
     public bool LoseReply, InvalidListing;
     public DirectoryPermission Permission = DirectoryPermission.FullAccess;
     public Func<Task>? DuringUpload;
+    public bool DeferVerification;
+    public Func<CancellationToken, Task>? DuringVerification;
     public override async Task<FolderListingResult> ListAsync(ulong disk, ulong folder, CancellationToken ct)
-    { ListCalls++; var result = await base.ListAsync(disk, folder, ct); return result with { IsValidPage = !InvalidListing, Permission = Permission }; }
+    {
+        ListCalls++; if (folder == FailingFolder) throw new IOException("Synthetic unavailable directory");
+        var result = await base.ListAsync(disk, folder, ct);
+        if (DeclaredSizeOverride is { } declared) result = result with { Items = result.Items.Select(i => i.IsFolder ? i : new YuWangItem
+            { Id = i.Id, Name = i.Name, Size = declared, Type = i.Type, UploadTime = i.UploadTime }).ToArray() };
+        return result with { IsValidPage = !InvalidListing, Permission = Permission };
+    }
+    public override Task<long?> SizeAsync(Entry entry, CancellationToken ct)
+    { Interlocked.Increment(ref SizeCalls); return base.SizeAsync(entry, ct); }
     public override async Task<YuWangItem> UploadAsync(ulong disk, ulong parent, Operation op, Stream snapshot, Action<ulong> rememberId, Action<UploadAttempt> rememberAttempt, Action<UploadProgress>? progress, CancellationToken ct)
     {
         if (op.NewRemoteId == 0) UploadCalls++;
-        var result = await base.UploadAsync(disk, parent, op, snapshot, rememberId, rememberAttempt, progress, ct);
-        if (DuringUpload is { } action) await action();
+        var result = await base.UploadAsync(disk, parent, DeferVerification ? op : op with { RunVerification = true }, snapshot, rememberId, rememberAttempt, progress, ct);
+        if (DuringUpload is { } action) await action().WaitAsync(ct);
         if (LoseReply) { LoseReply = false; throw new HttpRequestException("synthetic lost reply"); }
         return result;
     }
     public override Task<bool> DeleteAsync(ulong disk, ulong parent, ulong id, bool directory, CancellationToken ct)
     { DeleteCalls++; return base.DeleteAsync(disk, parent, id, directory, ct); }
+    public override async Task<DownloadReceipt> HashAsync(Entry entry, CancellationToken ct)
+    { Interlocked.Increment(ref HashCalls); if (DuringVerification is { } action) await action(ct); return await base.HashAsync(entry, ct); }
 }
 
 public sealed class Fixture : IAsyncDisposable
@@ -48,6 +62,7 @@ public sealed class Fixture : IAsyncDisposable
     {
         Workspace = new(new OperationStore(Files.DatabasePath), Files, new MemorySecretStore(), new FileSnapshotProvider(), (_, _) => Cloud);
         await Workspace.CompleteLoginAsync(Account, "synthetic", Cloud);
+        Workspace.SetNetworkCost(NetworkCost.Unmetered);
     }
     public async Task ReopenAsync() { await Workspace.DisposeAsync(); await OpenAsync(); }
     public string File(string name, string content)

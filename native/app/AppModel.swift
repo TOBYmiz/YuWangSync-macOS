@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import Network
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -21,6 +22,9 @@ final class AppModel: ObservableObject {
     @Published var showCollisions = false
     @Published var showMove = false
     private var started = false
+    private let networkMonitor = NWPathMonitor()
+    private var networkCost = "unknown"
+    private var reportedNetworkCost: String?
     private var back: [String] = [], forward: [String] = []
     var isSelfTest: Bool { CommandLine.arguments.contains("--ui-selftest") }
     var isDemo: Bool { isSelfTest || CommandLine.arguments.contains("--demo") }
@@ -37,6 +41,8 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             let previous = self.state?.folderId
             self.state = state
+            self.reportNetworkCost()
+            if let operation = self.transfer?.operationId, !state.operations.contains(where: { $0.id == operation && $0.state == "running" }) { self.transfer = nil }
             NativeDiagnostics.write("state received entries=\(state.entries.count) operations=\(state.operations.count)")
             if previous != state.folderId { self.sidebarSelection = state.folderId; self.selection.removeAll() }
             self.selection.formIntersection(Set(state.entries.map(\.id)))
@@ -46,6 +52,17 @@ final class AppModel: ObservableObject {
         bridge.onFailure = { [weak self] error in self?.errorMessage = error }
         do { try bridge.start(demo: isDemo) }
         catch { errorMessage = error.localizedDescription }
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            let cost = path.status == .satisfied ? (path.isExpensive || path.usesInterfaceType(.cellular) ? "expensive" : "unmetered") : "unknown"
+            Task { @MainActor in self?.networkCost = cost; self?.reportNetworkCost() }
+        }
+        networkMonitor.start(queue: DispatchQueue(label: "YuWangSync.network-cost"))
+    }
+    func stopMonitoring() { networkMonitor.cancel() }
+    private func reportNetworkCost() {
+        guard state != nil, reportedNetworkCost != networkCost else { return }
+        reportedNetworkCost = networkCost
+        Task { _ = try? await send("networkCost", ["value": networkCost]) }
     }
     func perform(_ action: @escaping @MainActor () async throws -> Void) {
         Task { do { try await action() } catch { errorMessage = error.localizedDescription } }
@@ -127,6 +144,10 @@ final class AppModel: ObservableObject {
         guard let op = selectedOperation else { return }
         perform { if await self.confirm("取消这项任务？", detail: "未发送的依赖任务将一起取消。已发送请求会保留记录以核对结果，本地修改不会删除。", button: "取消任务") { _ = try await self.send("cancel", ["operationId": op.id]) } }
     }
+    func verifyTaskNow() {
+        guard let op = selectedOperation, op.state == "awaitingVerification" else { return }
+        perform { _ = try await self.send("verifyUpload", ["operationId": op.id]) }
+    }
     func overwriteTask() {
         guard let op = selectedOperation else { return }
         perform {
@@ -192,7 +213,8 @@ final class AppModel: ObservableObject {
         func folder(_ entry: CloudEntry, _ seen: Set<String>) -> SidebarNode {
             var next = seen; let fresh = next.insert(entry.id).inserted
             let children = fresh ? state.entries.filter { $0.parentId == entry.id && $0.isDirectory }.map { folder($0, next) } : []
-            return SidebarNode(id: entry.id, title: entry.name, symbol: entry.isDiskRoot ? "externaldrive" : "folder", children: children.isEmpty ? nil : children)
+            return SidebarNode(id: entry.id, title: entry.name, symbol: entry.isDiskRoot ? "externaldrive" : "folder", children: children.isEmpty ? nil : children,
+                               unloaded: entry.lastListed == nil && (entry.isDiskRoot || entry.remoteId != 0))
         }
         func container(_ node: DiskNode, _ seen: Set<UInt64>) -> SidebarNode {
             var next = seen; let fresh = next.insert(node.id).inserted

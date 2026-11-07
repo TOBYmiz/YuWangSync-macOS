@@ -11,6 +11,7 @@ mkdir -p "$app/Contents/MacOS/Engine" "$app/Contents/Resources"
 dotnet publish src/YuWangSync.Engine/YuWangSync.Engine.csproj -c Release -r osx-arm64 \
   --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=false \
   -p:RestoreLockedMode=true -o "$app/Contents/MacOS/Engine"
+python3 tools/collect-licenses.py "$app/Contents/Resources/OpenSourceNotices.txt"
 mkdir -p "$app/Contents/Resources/Symbols"
 while IFS= read -r -d '' symbols; do mv "$symbols" "$app/Contents/Resources/Symbols/"; done < <(find "$app/Contents/MacOS/Engine" -type f -name '*.pdb' -print0)
 if find "$app/Contents/MacOS/Engine" -name '*.dll' -print -quit | grep -q .; then
@@ -28,8 +29,9 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>育网云</string>
 <key>CFBundleExecutable</key><string>YuWangSync</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>YuWangReleaseVersion</key><string>0.1.0-preview.2</string>
 <key>CFBundleIconFile</key><string>app.icns</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
@@ -52,4 +54,26 @@ codesign --verify --deep --strict "$app"
 plutil -lint "$app/Contents/Info.plist"
 ditto -c -k --sequesterRsrc --keepParent "$app" "$root/artifacts/YuWangSync-macOS-arm64-preview.zip"
 (cd "$root/artifacts" && shasum -a 256 YuWangSync-macOS-arm64-preview.zip > YuWangSync-macOS-arm64-preview.zip.sha256)
+image_root="$work/dmg-root"
+mkdir -p "$image_root"
+ditto "$app" "$image_root/YuWangSync.app"
+ln -s /Applications "$image_root/Applications"
+cat > "$image_root/安装说明.txt" <<'INSTALL'
+将 YuWangSync.app 拖入 Applications 即可安装。
+适用 macOS 14+、Apple Silicon。应用自带运行时。
+此版本为预览版，采用 ad-hoc 签名，尚未完成 Developer ID 签名与 Apple 公证。
+INSTALL
+dmg="$root/artifacts/YuWangSync-macOS-arm64-preview.dmg"
+hdiutil create -ov -volname "育网云" -srcfolder "$image_root" -format UDZO -fs HFS+ "$dmg"
+hdiutil verify "$dmg"
+mount="$work/dmg-mount"
+mkdir -p "$mount"
+hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg"
+trap 'hdiutil detach "$mount" >/dev/null 2>&1 || true' EXIT
+codesign --verify --deep --strict "$mount/YuWangSync.app"
+test "$(readlink "$mount/Applications")" = /Applications
+diff -qr "$app" "$mount/YuWangSync.app"
+hdiutil detach "$mount"
+trap - EXIT
+(cd "$root/artifacts" && shasum -a 256 YuWangSync-macOS-arm64-preview.dmg > YuWangSync-macOS-arm64-preview.dmg.sha256)
 echo "Created $app"

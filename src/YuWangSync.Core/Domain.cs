@@ -22,6 +22,8 @@ public sealed record Entry
     public bool IsDiskRoot { get; init; }
     public bool RemoteMissing { get; init; }
     public long? Size { get; init; }
+    public long? DeclaredSize { get; init; }
+    public string? SizeStamp { get; init; }
     public DateTime? UploadTime { get; init; }
     public string RemoteStamp { get; init; } = "";
     public string? LocalPath { get; init; }
@@ -33,7 +35,8 @@ public sealed record Entry
     public DateTimeOffset? LastListed { get; init; }
     public DirectoryPermission Permission { get; init; }
     public string Status { get; init; } = "";
-    public string SizeLabel => IsDirectory ? "—" : Size is { } s ? FormatBytes(s) : "未知";
+    public string SizeLabel => IsDirectory ? "—" : Size is { } s
+        ? SizeStamp == RemoteStamp ? FormatBytes(s) : "约 " + FormatBytes(s) : "未知";
     public static string FormatBytes(long size) => size >= 1073741824 ? $"{size / 1073741824d:F2} GB"
         : size >= 1048576 ? $"{size / 1048576d:F1} MB" : size >= 1024 ? $"{size / 1024d:F1} KB" : $"{size} B";
     public override string ToString() => Name;
@@ -41,8 +44,14 @@ public sealed record Entry
 }
 
 public enum OperationKind { CreateFolder, Upload, Rename, Move, Delete }
-public enum OperationState { Queued, Running, Uncertain, Blocked, Failed, Completed, Cancelled }
+public enum OperationState { Queued, Running, Uncertain, Blocked, Failed, Completed, Cancelled, AwaitingVerification }
 public enum CollisionChoice { Ask, Skip, Replace, Rename }
+public enum NetworkCost { Unknown, Unmetered, Expensive }
+public sealed record SyncSettings
+{
+    public bool VerifyAfterUpload { get; init; } = true;
+    public bool VerifyOnExpensiveNetwork { get; init; }
+}
 
 public sealed record Operation
 {
@@ -69,6 +78,10 @@ public sealed record Operation
     public ulong[]? BeforeIds { get; init; }
     public string? BackupName { get; init; }
     public UploadAttempt? UploadAttempt { get; init; }
+    public string? VerificationStamp { get; init; }
+    public bool VerificationRequired { get; init; }
+    public bool VerificationRequested { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore] public bool RunVerification { get; init; }
     public string? Error { get; init; }
     public DateTimeOffset Created { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? RetryAfter { get; init; }
@@ -78,7 +91,8 @@ public sealed record Operation
     {
         OperationState.Queued => "等待同步", OperationState.Running => "处理中",
         OperationState.Uncertain => "结果待核对", OperationState.Blocked => "需要处理",
-        OperationState.Failed => "失败", OperationState.Completed => "完成", _ => "已取消"
+        OperationState.Failed => "失败", OperationState.Completed => "完成",
+        OperationState.AwaitingVerification => "等待下载校验", _ => "已取消"
     };
     public string KindLabel => Kind switch { OperationKind.CreateFolder => "新建目录", OperationKind.Upload => "上传",
         OperationKind.Rename => "重命名", OperationKind.Move => "移动", _ => "删除" };
@@ -95,6 +109,12 @@ public sealed record ImportCollision(Guid EntryId, string LocalPath, string Clou
 public sealed class ConflictException(string message) : IOException(message);
 public sealed class UncertainException(string message) : IOException(message);
 public sealed class SessionExpiredException() : IOException("登录已失效，请重新登录；待办内容已保留。");
+public sealed class UploadVerificationPendingException(YuWangItem candidate, bool required)
+    : IOException("上传已完成，等待后台下载校验。")
+{
+    public YuWangItem Candidate { get; } = candidate;
+    public bool Required { get; } = required;
+}
 
 public interface ISecretStore
 {

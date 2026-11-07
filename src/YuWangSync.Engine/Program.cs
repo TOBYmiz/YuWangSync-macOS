@@ -35,6 +35,7 @@ public sealed class EngineHost : IAsyncDisposable
     { Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) } };
     private readonly Workspace _workspace;
     private readonly LocalFiles _files;
+    private readonly ISecretStore _secrets;
     private readonly bool _demo;
     private readonly SemaphoreSlim _output = new(1, 1), _loginGate = new(1, 1);
     private readonly CancellationTokenSource _done = new();
@@ -51,6 +52,7 @@ public sealed class EngineHost : IAsyncDisposable
     {
         _files = files; _demo = demo;
         ISecretStore secrets = demo ? new MemorySecretStore() : OperatingSystem.IsMacOS() ? new MacSecretStore() : new WindowsSecretStore(Path.Combine(files.DataRoot, "credentials"));
+        _secrets = secrets;
         IFileSnapshotProvider snapshots = OperatingSystem.IsMacOS() ? new MacSnapshotProvider() : new FileSnapshotProvider();
         var cloud = demo ? new DemoCloudClient() : null;
         _workspace = new(new OperationStore(files.DatabasePath), files, secrets, snapshots, cloud is null ? null : (_, _) => cloud);
@@ -238,9 +240,11 @@ public sealed class EngineHost : IAsyncDisposable
             if (!Uri.TryCreate(Text(p, "server").Trim(), UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || uri.UserInfo.Length != 0)
                 throw new ArgumentException("请输入有效的 HTTP 或 HTTPS 服务器地址。");
             var user = Text(p, "username").Trim(); var password = Text(p, "password");
-            if (user.Length == 0 || password.Length == 0) throw new ArgumentException("请输入账号与密码。");
+            if (user.Length == 0) throw new ArgumentException("请输入账号。");
             var server = uri.AbsoluteUri.TrimEnd('/');
             _loginAccount = _workspace.Store.Accounts().FirstOrDefault(a => a.Server == server && a.Username == user) ?? new Account(Guid.NewGuid(), server, user);
+            if (password.Length == 0) password = await _secrets.GetAsync(_loginAccount.Id + ":password", _loginStop.Token) ?? "";
+            if (password.Length == 0) throw new ArgumentException("没有可用的已保存密码，请输入密码。");
             _loginPassword = password; _login = _workspace.CreateLoginClient(_loginAccount, password);
             return new { image = Convert.ToBase64String(await _login.CaptchaAsync(_loginStop.Token)) };
         }

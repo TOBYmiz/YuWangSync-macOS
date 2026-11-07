@@ -32,6 +32,7 @@ struct RootView: View {
             HStack {
                 if let state = model.state, !state.accounts.isEmpty {
                     Picker("账号", selection: Binding(get: { state.activeAccount?.id ?? "" }, set: { model.activate($0) })) {
+                        Text("选择账号").tag("")
                         ForEach(state.accounts) { account in Text(account.label).tag(account.id) }
                     }.labelsHidden()
                 } else { Text("育网云").font(.headline) }
@@ -236,7 +237,7 @@ struct LoginSheet: View {
             Form {
                 TextField("服务器", text: $server, prompt: Text("http://服务器地址")).disabled(existing != nil)
                 TextField("账号", text: $username).disabled(existing != nil)
-                SecureField("密码", text: $password)
+                SecureField("密码", text: $password, prompt: Text(existing == nil ? "输入密码" : "留空使用钥匙串中的密码"))
                 HStack {
                     if let image { Image(nsImage: image).interpolation(.none).resizable().scaledToFit().frame(width: 160, height: 55) }
                     Button("获取验证码") {
@@ -249,7 +250,7 @@ struct LoginSheet: View {
                             } catch { status = error.localizedDescription }
                             busy = false
                         }
-                    }.disabled(busy || server.isEmpty || username.isEmpty || password.isEmpty)
+                    }.disabled(busy || server.isEmpty || username.isEmpty || password.isEmpty && existing == nil)
                 }
                 TextField("验证码", text: $code).disabled(image == nil)
             }.formStyle(.grouped)

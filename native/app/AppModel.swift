@@ -58,7 +58,7 @@ final class AppModel: ObservableObject {
     func goBack() { guard let id = back.popLast() else { return }; if let current = state?.folderId { forward.append(current) }; perform { try await self.navigate(id, history: false) } }
     func goForward() { guard let id = forward.popLast() else { return }; if let current = state?.folderId { back.append(current) }; perform { try await self.navigate(id, history: false) } }
     func goUp() { if let parent = currentFolder?.parentId { perform { try await self.navigate(parent) } } }
-    func activate(_ account: String) { guard account != state?.activeAccount?.id else { return }; back.removeAll(); forward.removeAll(); perform { _ = try await self.send("activate", ["accountId": account]) } }
+    func activate(_ account: String) { guard !account.isEmpty, account != state?.activeAccount?.id else { return }; back.removeAll(); forward.removeAll(); perform { _ = try await self.send("activate", ["accountId": account]) } }
     func open(_ entry: CloudEntry) {
         perform {
             if entry.isDirectory { try await self.navigate(entry.id) }

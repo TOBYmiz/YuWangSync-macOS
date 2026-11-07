@@ -17,6 +17,7 @@ public sealed partial class Workspace : IAsyncDisposable
     private CancellationTokenSource _accountStop = new();
     private CancellationTokenSource? _currentStop;
     private ICloudClient? _client;
+    private bool _credentialsUnavailable;
     private Task? _worker;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> _opened = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> _localLocks = new();
@@ -57,9 +58,19 @@ public sealed partial class Workspace : IAsyncDisposable
     }
     public async Task ActivateAsync(Account account, CancellationToken ct = default)
     {
-        var password = await _secrets.GetAsync(account.Id + ":password", ct) ?? "";
+        string password; string? session;
+        try
+        {
+            password = await _secrets.GetAsync(account.Id + ":password", ct) ?? "";
+            session = await _secrets.GetAsync(account.Id + ":session", ct);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            await ActivateClientAsync(account, _factory(account, ""), false, ct);
+            _credentialsUnavailable = true; ConnectionStatus = "凭据暂时不可用，可浏览离线内容或重新登录"; Notify(); return;
+        }
         var client = _factory(account, password);
-        client.SetSession(await _secrets.GetAsync(account.Id + ":session", ct));
+        client.SetSession(session);
         await ActivateClientAsync(account, client, false, ct);
         await ReconnectAsync(ct);
     }
@@ -71,6 +82,7 @@ public sealed partial class Workspace : IAsyncDisposable
         {
             _client?.Dispose(); _accountStop.Dispose(); _accountStop = new();
             _client = client; ActiveAccount = account; Offline = !online;
+            _credentialsUnavailable = false;
             Store.ActiveAccountId = account.Id;
             ConnectionStatus = online ? "在线" : "离线缓存"; _scanRequested = true;
         }
@@ -100,6 +112,7 @@ public sealed partial class Workspace : IAsyncDisposable
     public async Task ReconnectAsync(CancellationToken ct = default)
     {
         if (ManualOffline || _client is null) return;
+        if (_credentialsUnavailable && ActiveAccount is { } account) { await ActivateAsync(account, ct); return; }
         await _network.WaitAsync(ct);
         try
         {

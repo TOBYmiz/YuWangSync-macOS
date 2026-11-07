@@ -65,6 +65,26 @@ public sealed class Fixture : IAsyncDisposable
 
 public sealed class WorkspaceTests
 {
+    [Fact] public async Task Unavailable_secret_store_keeps_cached_account_browsable()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YuWangSync-secret-failure-" + Guid.NewGuid().ToString("N"));
+        var files = new LocalFiles(root, Path.Combine(root, "cache")); var account = new Account(Guid.NewGuid(), "https://example.invalid", "cached");
+        var store = new OperationStore(files.DatabasePath); store.SaveAccount(account);
+        var disk = new Entry { AccountId = account.Id, DiskId = 7, Name = "cached disk", IsDirectory = true, IsDiskRoot = true }; store.Save(entries: [disk]);
+        await using (var workspace = new Workspace(store, files, new UnavailableSecrets(), new FileSnapshotProvider(), (_, _) => new TestCloud()))
+        {
+            await workspace.ActivateAsync(account); Assert.True(workspace.Offline); Assert.Equal(account.Id, workspace.ActiveAccount?.Id);
+            Assert.Contains(workspace.ProjectedEntries(account.Id), e => e.Id == disk.Id);
+            await workspace.ReconnectAsync(); Assert.True(workspace.Offline);
+        }
+        Directory.Delete(root, true);
+    }
+    private sealed class UnavailableSecrets : ISecretStore
+    {
+        public Task<string?> GetAsync(string key, CancellationToken ct = default) => throw new IOException("Synthetic locked keychain");
+        public Task SetAsync(string key, string value, CancellationToken ct = default) => throw new IOException();
+        public Task DeleteAsync(string key, CancellationToken ct = default) => throw new IOException();
+    }
     [Fact] public async Task Clean_account_removal_clears_persisted_selection()
     {
         await using var f = await Fixture.CreateAsync(); await f.Workspace.RemoveAccountAsync(f.Account);

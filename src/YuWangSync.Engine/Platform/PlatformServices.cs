@@ -9,10 +9,10 @@ namespace YuWangSync.Engine.Platform;
 
 public sealed class MemorySecretStore : ISecretStore
 {
-    private readonly Dictionary<string, string> _values = [];
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _values = new();
     public Task<string?> GetAsync(string key, CancellationToken ct = default) => Task.FromResult(_values.GetValueOrDefault(key));
     public Task SetAsync(string key, string value, CancellationToken ct = default) { _values[key] = value; return Task.CompletedTask; }
-    public Task DeleteAsync(string key, CancellationToken ct = default) { _values.Remove(key); return Task.CompletedTask; }
+    public Task DeleteAsync(string key, CancellationToken ct = default) { _values.TryRemove(key, out _); return Task.CompletedTask; }
 }
 
 public sealed class MacSecretStore : ISecretStore

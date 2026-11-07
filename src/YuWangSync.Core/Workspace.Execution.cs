@@ -22,7 +22,7 @@ public sealed partial class Workspace
                     { _scanRequested = false; await ScanEditsAsync(_stop.Token); nextScan = DateTimeOffset.UtcNow.AddSeconds(30); }
                     if (DateTimeOffset.UtcNow >= nextCleanup)
                     { await CleanupAsync(false, _stop.Token); nextCleanup = DateTimeOffset.UtcNow.AddHours(24); }
-                    if (Offline && !ManualOffline && ActiveAccount is not null && DateTimeOffset.UtcNow >= nextReconnect)
+                    if (Offline && !ManualOffline && !_credentialsUnavailable && ActiveAccount is not null && DateTimeOffset.UtcNow >= nextReconnect)
                     { nextReconnect = DateTimeOffset.UtcNow.AddSeconds(30); await ReconnectAsync(_stop.Token); }
                     if (!Paused && !Offline && !ManualOffline) await RunOnceAsync(_stop.Token);
                 }

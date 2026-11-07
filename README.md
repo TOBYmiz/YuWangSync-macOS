@@ -17,7 +17,7 @@
 
 ## 开发
 
-需要 .NET SDK 10.0.401 或兼容的 .NET 10 SDK。依赖版本在项目和锁文件中固定。
+开发使用固定的 .NET SDK 10.0.401，CI 安装同一版本。托管依赖及 osx-arm64 单文件发布依赖使用分别提交的锁文件，避免 SDK 补丁升级改变隐式依赖。
 
 ```powershell
 dotnet restore YuWangSync.slnx --locked-mode

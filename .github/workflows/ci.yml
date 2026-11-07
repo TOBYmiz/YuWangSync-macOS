@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
         with:
-          global-json-file: global.json
+          dotnet-version: '10.0.401'
           cache: true
           cache-dependency-path: '**/packages*.lock.json'
       - run: dotnet restore YuWangSync.slnx --locked-mode
@@ -46,7 +46,7 @@ jobs:
         run: test "$(uname -m)" = arm64
       - uses: actions/setup-dotnet@v5
         with:
-          global-json-file: global.json
+          dotnet-version: '10.0.401'
           cache: true
           cache-dependency-path: '**/packages*.lock.json'
       - run: dotnet restore YuWangSync.slnx --locked-mode

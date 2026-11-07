@@ -274,7 +274,7 @@ enum NativeSelfTest {
         }
         let identifiers = window.toolbar?.items.map { $0.itemIdentifier.rawValue } ?? []
         let required: Set<String> = ["back", "forward", "refresh", "upload", "download", "newFolder", "more", "tasks", "search"]
-        checks["native-file-toolbar-" + suffix] = window.toolbar?.identifier.rawValue == "YuWangMainToolbar"
+        checks["native-file-toolbar-" + suffix] = window.toolbar?.identifier == "YuWangMainToolbar"
             && window.toolbar?.isVisible == true && required.isSubset(of: Set(identifiers))
         return ["windowFrame": NSStringFromRect(window.frame), "content": NSStringFromRect(content),
                 "contentLayout": NSStringFromRect(window.contentLayoutRect), "trafficLights": frames.map { NSStringFromRect($0) },

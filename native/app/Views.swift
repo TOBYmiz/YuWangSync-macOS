@@ -11,7 +11,9 @@ struct RootView: View {
         return entries.filter(\.isDirectory) + entries.filter { !$0.isDirectory }
     }
     var body: some View {
-        NavigationSplitView { sidebar } detail: { detail }
+        // NavigationSplitView installs its own window toolbar when hosted by AppKit.
+        // Keep the split content below the native title bar owned by AppDelegate.
+        HSplitView { sidebar; content.frame(maxWidth: .infinity, maxHeight: .infinity) }
             .frame(minWidth: 900, minHeight: 620)
             .onChange(of: model.sidebarSelection) { _, value in
                 if let value, !value.hasPrefix("container:"), value != model.state?.folderId {
@@ -57,12 +59,7 @@ struct RootView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 if model.state?.demo == true { Text("演示数据 · 不连接真实服务器").font(.caption2).foregroundStyle(.secondary) }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
-        }.navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 330)
-    }
-    private var detail: some View {
-        content
-            .navigationTitle(model.currentFolder?.name ?? "育网云")
-            .navigationSubtitle(model.state?.activeAccount?.displayName ?? "")
+        }.frame(minWidth: 180, idealWidth: 230, maxWidth: 330, maxHeight: .infinity)
     }
     @ViewBuilder private var content: some View {
         if model.state?.activeAccount == nil {

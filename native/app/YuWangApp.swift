@@ -28,6 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         NativeDiagnostics.write("did finish launching; args=\(CommandLine.arguments)")
         installMenus()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        // Leave title-bar geometry and traffic-light placement to AppKit. Content
+        // must not extend into this area through fullSizeContentView.
+        window.titlebarAppearsTransparent = false
         window.title = "育网云"
         window.contentMinSize = NSSize(width: 900, height: 620)
         window.contentViewController = NSHostingController(rootView: RootView(model: model))
@@ -207,7 +210,7 @@ enum NativeSelfTest {
     static func run(model: AppModel) async {
         guard !ran else { return }; ran = true
         NativeDiagnostics.write("self-test entered")
-        var checks: [String: Bool] = [:]; var error = ""
+        var checks: [String: Bool] = [:]; var chrome: [String: Any] = [:]; var error = ""
         let arguments = CommandLine.arguments
         let index = arguments.firstIndex(of: "--output")
         let path = index.flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil } ?? NSTemporaryDirectory() + "ui-macos.json"
@@ -233,25 +236,64 @@ enum NativeSelfTest {
             if let file = model.state?.entries.first(where: { !$0.isDirectory }) { model.selection = [file.id] }
             model.showTasks = true
             try await Task.sleep(nanoseconds: 400_000_000)
-            if let view = AppDelegate.shared?.mainWindow?.contentView?.superview, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-                view.cacheDisplay(in: view.bounds, to: bitmap)
-                let opaque = NSImage(size: view.bounds.size, flipped: false) { rectangle in
-                    NSColor.windowBackgroundColor.setFill(); NSBezierPath(rect: rectangle).fill(); bitmap.draw(in: rectangle); return true
-                }
-                if let tiff = opaque.tiffRepresentation, let rendered = NSBitmapImageRep(data: tiff), let image = rendered.representation(using: .png, properties: [:]) {
-                    try image.write(to: URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("png"))
-                }
-            }
+            guard let window = AppDelegate.shared?.mainWindow else { throw BridgeError(message: "原生主窗口丢失。") }
+            let screenshot = URL(fileURLWithPath: path).deletingPathExtension()
+            chrome["default"] = inspectChrome(window, suffix: "default", checks: &checks)
+            try capture(window, to: screenshot.appendingPathExtension("png"))
+            checks["full-window-screenshot"] = true
+            let originalFrame = window.frame
+            window.setContentSize(window.contentMinSize)
+            try await Task.sleep(nanoseconds: 300_000_000)
+            chrome["minimum"] = inspectChrome(window, suffix: "minimum", checks: &checks)
+            try capture(window, to: URL(fileURLWithPath: screenshot.path + "-minimum.png"))
+            checks["minimum-window-screenshot"] = true
+            window.setFrame(originalFrame, display: true)
         } catch let failure { error = failure.localizedDescription + "\n" + model.bridge.stderr }
         NativeDiagnostics.write("self-test requesting engine shutdown")
         checks["engine-shutdown"] = await AppDelegate.shared?.prepareForTermination() == true
-        let passed = checks.count == 5 && checks.values.allSatisfy { $0 } && error.isEmpty
+        let passed = checks.count == 13 && checks.values.allSatisfy { $0 } && error.isEmpty
         do {
             let output = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: ["passed": passed, "nativeControls": true, "checks": checks, "error": error], options: [.prettyPrinted, .sortedKeys])
+            let data = try JSONSerialization.data(withJSONObject: ["passed": passed, "nativeControls": true, "checks": checks, "windowChrome": chrome, "error": error], options: [.prettyPrinted, .sortedKeys])
             try data.write(to: output, options: .atomic)
         } catch { FileHandle.standardError.write(Data(error.localizedDescription.utf8)) }
         NSApp.terminate(nil)
+    }
+    private static func inspectChrome(_ window: NSWindow, suffix: String, checks: inout [String: Bool]) -> [String: Any] {
+        window.contentView?.superview?.layoutSubtreeIfNeeded()
+        let kinds: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        let buttons = kinds.compactMap { window.standardWindowButton($0) }
+        let frames = buttons.map { $0.convert($0.bounds, to: nil) }
+        let content = window.contentView.map { $0.convert($0.bounds, to: nil) } ?? .zero
+        let visible = buttons.count == 3 && buttons.allSatisfy {
+            $0.window === window && !$0.isHiddenOrHasHiddenAncestor && $0.isEnabled && !$0.visibleRect.isEmpty
+        }
+        checks["native-traffic-lights-" + suffix] = visible
+        checks["titlebar-content-clearance-" + suffix] = visible && !content.isEmpty && frames.allSatisfy {
+            !$0.isEmpty && !$0.intersects(content) && $0.minY >= window.contentLayoutRect.maxY
+        }
+        let identifiers = window.toolbar?.items.map { $0.itemIdentifier.rawValue } ?? []
+        let required: Set<String> = ["back", "forward", "refresh", "upload", "download", "newFolder", "more", "tasks", "search"]
+        checks["native-file-toolbar-" + suffix] = window.toolbar?.identifier.rawValue == "YuWangMainToolbar"
+            && window.toolbar?.isVisible == true && required.isSubset(of: Set(identifiers))
+        return ["windowFrame": NSStringFromRect(window.frame), "content": NSStringFromRect(content),
+                "contentLayout": NSStringFromRect(window.contentLayoutRect), "trafficLights": frames.map { NSStringFromRect($0) },
+                "toolbarItems": identifiers]
+    }
+    private static func capture(_ window: NSWindow, to output: URL) throws {
+        guard let view = window.contentView?.superview,
+              let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            throw BridgeError(message: "无法创建完整窗口截图。")
+        }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let opaque = NSImage(size: view.bounds.size, flipped: false) { rectangle in
+            NSColor.windowBackgroundColor.setFill(); NSBezierPath(rect: rectangle).fill(); bitmap.draw(in: rectangle); return true
+        }
+        guard let tiff = opaque.tiffRepresentation, let rendered = NSBitmapImageRep(data: tiff),
+              let image = rendered.representation(using: .png, properties: [:]) else {
+            throw BridgeError(message: "无法导出完整窗口截图。")
+        }
+        try image.write(to: output)
     }
 }
 

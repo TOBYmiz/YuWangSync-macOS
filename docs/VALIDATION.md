@@ -2,7 +2,7 @@
 
 自动验证包括：从 Windows 移植的 34 个协议场景和新增的 2 个恢复场景，以及离线队列、账号隔离、目录合并、冲突、取消、SQLite 重开、缓存保护、递归下载、稳定快照、流式下载与引擎管道测试。
 
-Mac 应用的 `--ui-selftest --output <json>` 在独立临时目录使用演示服务，检查原生窗口、侧栏和列表数据、经管道提交的目录任务，导出 JSON 与 PNG 后退出。Windows 使用引擎的 `--smoke-test`，不声称验证 Mac 原生界面。
+Mac 应用的 `--ui-selftest --output <json>` 在独立临时目录使用演示服务，检查原生窗口、侧栏和列表数据、经管道提交的目录任务，以及引擎和应用退出。默认尺寸和最小尺寸下均检查系统红黄绿按钮可见且不与内容重叠、文件操作工具栏完整保留，并导出包含标题栏的 PNG 与记录窗口几何信息的 JSON。Windows 使用引擎的 `--smoke-test`，不声称验证 Mac 原生界面。
 
 `--platform-selftest --output <json>` 使用随机测试键检查凭据读写删除，并验证文件快照。Mac 运行真实 Keychain / NSFileCoordinator 桥接，Windows 运行独立 DPAPI 适配。不会读真实账号。
 

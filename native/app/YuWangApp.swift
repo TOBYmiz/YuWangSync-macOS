@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private var statusLine: NSMenuItem?
     private var quitting = false
+    override init() { super.init(); Self.shared = self }
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -82,8 +83,9 @@ enum NativeSelfTest {
         let index = arguments.firstIndex(of: "--output")
         let path = index.flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil } ?? NSTemporaryDirectory() + "ui-macos.json"
         do {
+            try FileManager.default.createDirectory(at: URL(fileURLWithPath: path).deletingLastPathComponent(), withIntermediateDirectories: true)
             for _ in 0..<300 {
-                if model.state?.folderId != nil { break }
+                if model.state?.folderId != nil && AppDelegate.shared?.mainWindow?.isVisible == true { break }
                 if let failure = model.errorMessage { throw BridgeError(message: failure) }
                 try await Task.sleep(nanoseconds: 100_000_000)
             }

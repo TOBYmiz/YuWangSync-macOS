@@ -149,7 +149,7 @@ public sealed partial class Workspace
                 if (existing?.IsDirectory == true) throw new ConflictException("文件与已有目录同名：" + name);
                 var snapshot = await _snapshots.CaptureAsync(path, Files.SnapshotDirectory(target.AccountId), ct);
                 var entry = existing ?? new Entry { AccountId = target.AccountId, ParentId = targetId, DiskId = target.DiskId, Name = name, Size = snapshot.Length };
-                var op = NewOperation(entry, OperationKind.Upload, targetId, name) with
+                var op = NewOperation(entry, OperationKind.Upload, targetId, existing?.Name ?? name) with
                 {
                     SnapshotPath = snapshot.Path, SnapshotHash = snapshot.Hash, SnapshotLength = snapshot.Length,
                     SourcePath = path, Collision = CollisionChoice.Ask,

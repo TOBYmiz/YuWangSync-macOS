@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 
 namespace YuWangSync.Core.Storage;
 
@@ -30,8 +31,16 @@ public sealed class LocalFiles
         var invalid = Path.GetInvalidFileNameChars().Concat(['/', '\\', '\0', ':']).ToHashSet();
         var result = new string(name.Normalize().Select(c => invalid.Contains(c) || char.IsControl(c) ? '_' : c).ToArray()).TrimEnd(' ', '.');
         if (string.IsNullOrWhiteSpace(result) || result is "." or "..") result = "file";
-        if (OperatingSystem.IsWindows() && new[] { "CON", "PRN", "AUX", "NUL", "COM1", "LPT1" }.Contains(Path.GetFileNameWithoutExtension(result), StringComparer.OrdinalIgnoreCase)) result = "_" + result;
-        return result.Length > 160 ? result[..140] + Path.GetExtension(result)[..Math.Min(20, Path.GetExtension(result).Length)] : result;
+        if (OperatingSystem.IsWindows() && System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileNameWithoutExtension(result), @"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)) result = "_" + result;
+        if (Encoding.UTF8.GetByteCount(result) <= 240) return result;
+        static string Fit(string value, int budget)
+        {
+            var output = new StringBuilder(); var bytes = 0;
+            foreach (var rune in value.EnumerateRunes()) { if (bytes + rune.Utf8SequenceLength > budget) break; output.Append(rune.ToString()); bytes += rune.Utf8SequenceLength; }
+            return output.ToString();
+        }
+        var extension = Fit(Path.GetExtension(result), 40);
+        return Fit(Path.GetFileNameWithoutExtension(result), 240 - Encoding.UTF8.GetByteCount(extension)) + extension;
     }
     public static void ValidateCloudName(string name)
     {

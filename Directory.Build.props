@@ -7,5 +7,6 @@
     <Deterministic>true</Deterministic>
     <NuGetAuditMode>all</NuGetAuditMode>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath Condition="'$(RuntimeIdentifier)' != ''">$(MSBuildProjectDirectory)/packages.$(RuntimeIdentifier).lock.json</NuGetLockFilePath>
   </PropertyGroup>
 </Project>

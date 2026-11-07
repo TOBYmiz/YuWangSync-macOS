@@ -65,6 +65,20 @@ public sealed class Fixture : IAsyncDisposable
 
 public sealed class WorkspaceTests
 {
+    [Fact] public void Cached_filename_fits_mac_utf8_limit_without_splitting_unicode()
+    {
+        var name = LocalFiles.SafeName(string.Concat(Enumerable.Repeat("中文📁", 80)) + ".docx");
+        Assert.InRange(Encoding.UTF8.GetByteCount(name), 1, 240); Assert.EndsWith(".docx", name); Assert.DoesNotContain("\uFFFD", name);
+    }
+    [Fact] public async Task Case_insensitive_upload_collision_preserves_the_remote_name()
+    {
+        await using var f = await Fixture.CreateAsync(); f.Cloud.Items[1] = f.Cloud.Items[1] with { Name = "Report.TXT" };
+        await f.Workspace.BrowseAsync(f.Disk, true);
+        var ids = await f.Workspace.ImportAsync(f.Disk, [f.File("report.txt", "replacement")]);
+        var op = f.Workspace.Store.GetOperation(ids[0])!; Assert.Equal("Report.TXT", op.Name);
+        await f.Workspace.ResolveAsync(op.Id, CollisionChoice.Replace); await f.DrainAsync();
+        Assert.Equal(OperationState.Completed, f.Workspace.Store.GetOperation(op.Id)!.State);
+    }
     [Fact] public async Task Offline_create_child_upload_rename_resolves_temporary_ids()
     {
         await using var f = await Fixture.CreateAsync(); var w = f.Workspace; w.SetManualOffline(true);

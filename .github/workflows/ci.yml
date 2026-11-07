@@ -59,7 +59,7 @@ jobs:
       - name: Launch application bundle with synthetic data
         timeout-minutes: 3
         run: |
-          open -n -W artifacts/package/YuWangSync.app --args --ui-selftest --output "$PWD/artifacts/ui-macos.json"
+          open -n -W --stdout "$PWD/artifacts/ui-macos-stdout.log" --stderr "$PWD/artifacts/ui-macos-stderr.log" artifacts/package/YuWangSync.app --args --ui-selftest --output "$PWD/artifacts/ui-macos.json"
           python3 -c 'import json; assert json.load(open("artifacts/ui-macos.json"))["passed"]'
       - uses: actions/upload-artifact@v7.0.2
         if: always()

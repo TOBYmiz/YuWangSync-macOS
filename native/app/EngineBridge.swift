@@ -25,10 +25,12 @@ final class EngineBridge {
         child.standardInput = stdin; child.standardOutput = stdout; child.standardError = stderrPipe
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil; return }
             Task { @MainActor in self?.receive(data) }
         }
         stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil; return }
             Task { @MainActor in
                 guard let self else { return }
                 self.stderr += String(data: data, encoding: .utf8) ?? ""
@@ -46,6 +48,7 @@ final class EngineBridge {
         }
         input = stdin; output = stdout; errors = stderrPipe; process = child
         try child.run()
+        NativeDiagnostics.write("engine launched pid=\(child.processIdentifier)")
     }
     func request(_ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {
         guard let process, process.isRunning, let input else { throw BridgeError(message: "同步引擎尚未启动。") }
@@ -54,6 +57,12 @@ final class EngineBridge {
         data.append(10)
         return try await withCheckedThrowingContinuation { continuation in
             pending[id] = continuation
+            if method == "shutdown" {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    self?.pending.removeValue(forKey: id)?.resume(throwing: BridgeError(message: "引擎退出等待超时；下次启动将核对未完成事务。"))
+                }
+            }
             do { try input.fileHandleForWriting.write(contentsOf: data) }
             catch { pending.removeValue(forKey: id)?.resume(throwing: error) }
         }
@@ -77,9 +86,14 @@ final class EngineBridge {
             } catch { onFailure?("无法读取同步状态：\(error.localizedDescription)") }
         }
     }
-    func shutdown() async {
+    @discardableResult func shutdown() async -> Bool {
+        if shuttingDown { return process?.isRunning != true }
         shuttingDown = true
-        _ = try? await request("shutdown")
+        var confirmed = false
+        do { _ = try await request("shutdown"); confirmed = true }
+        catch { NativeDiagnostics.write("shutdown: \(error.localizedDescription)") }
         try? input?.fileHandleForWriting.close()
+        if !confirmed && process?.isRunning == true { process?.terminate() }
+        return confirmed
     }
 }

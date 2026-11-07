@@ -25,7 +25,7 @@ struct RootView: View {
             .alert("操作未完成", isPresented: Binding(get: { model.errorMessage != nil && !model.isSelfTest }, set: { if !$0 { model.errorMessage = nil } })) {
                 Button("确定") { model.errorMessage = nil }
             } message: { Text(model.errorMessage ?? "") }
-            .task { model.start(); if model.isSelfTest { await NativeSelfTest.run(model: model) } }
+            .task { model.start() }
     }
     private var sidebar: some View {
         VStack(spacing: 0) {

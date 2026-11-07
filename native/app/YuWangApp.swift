@@ -6,7 +6,7 @@ struct YuWangApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = AppModel.shared
     var body: some Scene {
-        Window("育网云", id: "main") { RootView(model: model) }
+        WindowGroup("育网云", id: "main") { RootView(model: model) }
             .defaultSize(width: 1180, height: 800)
             .commands {
                 CommandGroup(replacing: .newItem) { Button("显示育网云") { delegate.showWindow() }.keyboardShortcut("0", modifiers: .command) }
@@ -30,9 +30,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
     private var statusLine: NSMenuItem?
     private var quitting = false
-    override init() { super.init(); Self.shared = self }
+    override init() { super.init(); Self.shared = self; NativeDiagnostics.write("delegate init") }
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
+        NativeDiagnostics.write("did finish launching; args=\(CommandLine.arguments)")
+        NSApp.setActivationPolicy(.regular)
+        AppModel.shared.start()
+        NSApp.activate(ignoringOtherApps: true)
+        if AppModel.shared.isSelfTest { Task { await NativeSelfTest.run(model: AppModel.shared) } }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "externaldrive.badge.icloud", accessibilityDescription: "育网云")
         item.button?.image?.isTemplate = true
@@ -68,6 +73,7 @@ struct WindowCapture: NSViewRepresentable {
         DispatchQueue.main.async {
             if let window = view.window, let delegate = AppDelegate.shared {
                 delegate.mainWindow = window; window.delegate = delegate; window.tabbingMode = .disallowed
+                NativeDiagnostics.write("window captured visible=\(window.isVisible)")
             }
         }
     }
@@ -78,6 +84,7 @@ enum NativeSelfTest {
     private static var ran = false
     static func run(model: AppModel) async {
         guard !ran else { return }; ran = true
+        NativeDiagnostics.write("self-test entered")
         var checks: [String: Bool] = [:]; var error = ""
         let arguments = CommandLine.arguments
         let index = arguments.firstIndex(of: "--output")
@@ -90,6 +97,7 @@ enum NativeSelfTest {
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             guard let state = model.state, let folder = state.folderId else { throw BridgeError(message: "同步引擎未在限时内准备好演示目录。") }
+            NativeDiagnostics.write("state ready; windows=\(NSApp.windows.map { "\($0.title):\($0.isVisible)" })")
             checks["native-window"] = AppDelegate.shared?.mainWindow?.isVisible == true
             checks["native-table-data"] = state.entries.contains { !$0.isDirectory }
             checks["native-sidebar-data"] = !model.sidebarNodes.isEmpty
@@ -107,12 +115,24 @@ enum NativeSelfTest {
                 if let image = bitmap.representation(using: .png, properties: [:]) { try image.write(to: URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("png")) }
             }
         } catch let failure { error = failure.localizedDescription + "\n" + model.bridge.stderr }
-        let passed = checks.count == 4 && checks.values.allSatisfy { $0 } && error.isEmpty
+        NativeDiagnostics.write("self-test requesting engine shutdown")
+        checks["engine-shutdown"] = await model.bridge.shutdown()
+        let passed = checks.count == 5 && checks.values.allSatisfy { $0 } && error.isEmpty
         do {
             let output = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: ["passed": passed, "nativeControls": true, "checks": checks, "error": error], options: [.prettyPrinted, .sortedKeys])
             try data.write(to: output, options: .atomic)
         } catch { FileHandle.standardError.write(Data(error.localizedDescription.utf8)) }
         NSApp.terminate(nil)
+    }
+}
+
+enum NativeDiagnostics {
+    static func write(_ message: String) {
+        guard CommandLine.arguments.contains("--ui-selftest"), let index = CommandLine.arguments.firstIndex(of: "--output"), index + 1 < CommandLine.arguments.count else { return }
+        let path = URL(fileURLWithPath: CommandLine.arguments[index + 1]).deletingPathExtension().appendingPathExtension("trace.log")
+        let line = Data((ISO8601DateFormatter().string(from: Date()) + " " + message + "\n").utf8)
+        if !FileManager.default.fileExists(atPath: path.path) { FileManager.default.createFile(atPath: path.path, contents: nil) }
+        if let handle = try? FileHandle(forWritingTo: path) { defer { try? handle.close() }; _ = try? handle.seekToEnd(); try? handle.write(contentsOf: line) }
     }
 }

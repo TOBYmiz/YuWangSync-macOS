@@ -32,10 +32,12 @@ final class AppModel: ObservableObject {
 
     func start() {
         guard !started else { return }; started = true
+        NativeDiagnostics.write("model start")
         bridge.onState = { [weak self] state in
             guard let self else { return }
             let previous = self.state?.folderId
             self.state = state
+            NativeDiagnostics.write("state received entries=\(state.entries.count) operations=\(state.operations.count)")
             if previous != state.folderId { self.sidebarSelection = state.folderId; self.selection.removeAll() }
             self.selection.formIntersection(Set(state.entries.map(\.id)))
             AppDelegate.shared?.updateStatus()

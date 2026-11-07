@@ -56,18 +56,41 @@ jobs:
       - name: Keychain and coordinated-file smoke test
         timeout-minutes: 3
         run: artifacts/package/YuWangSync.app/Contents/MacOS/Engine/YuWangSync.Engine --platform-selftest --output artifacts/platform-macos.json
+      - name: Packaged engine smoke test
+        run: artifacts/package/YuWangSync.app/Contents/MacOS/Engine/YuWangSync.Engine --smoke-test --output artifacts/engine-macos.json
       - name: Launch application bundle with synthetic data
         timeout-minutes: 3
         run: |
-          open -n -W --stdout "$PWD/artifacts/ui-macos-stdout.log" --stderr "$PWD/artifacts/ui-macos-stderr.log" artifacts/package/YuWangSync.app --args --ui-selftest --output "$PWD/artifacts/ui-macos.json"
+          open -n --stdout "$PWD/artifacts/ui-macos-stdout.log" --stderr "$PWD/artifacts/ui-macos-stderr.log" artifacts/package/YuWangSync.app --args --ui-selftest --output "$PWD/artifacts/ui-macos.json"
+          for attempt in {1..75}; do
+            test -f artifacts/ui-macos.json && break
+            sleep 1
+          done
+          for diagnostic in artifacts/ui-macos*.log; do
+            if test -f "$diagnostic"; then echo "--- $diagnostic"; cat "$diagnostic"; fi
+          done
+          ps -ax -o pid,command | grep '[Y]uWangSync' || true
           python3 -c 'import json; assert json.load(open("artifacts/ui-macos.json"))["passed"]'
+          for attempt in {1..5}; do
+            pgrep -x YuWangSync >/dev/null || break
+            sleep 1
+          done
+          if pgrep -x YuWangSync >/dev/null; then echo 'Native app did not exit after its self-test.' >&2; exit 1; fi
       - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
+          name: macos-validation
+          path: |
+            artifacts/*macos*.json
+            artifacts/*macos*.png
+            artifacts/*macos*.log
+            artifacts/tests/**
+          retention-days: 7
+      - uses: actions/upload-artifact@v7.0.2
+        if: success()
+        with:
           name: macos-arm64-preview
           path: |
-            artifacts/*.zip
-            artifacts/*.sha256
-            artifacts/*macos*
-            artifacts/tests/**
+            artifacts/YuWangSync-macOS-arm64-preview.zip
+            artifacts/YuWangSync-macOS-arm64-preview.zip.sha256
           retention-days: 7

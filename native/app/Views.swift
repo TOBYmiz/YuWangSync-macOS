@@ -13,7 +13,6 @@ struct RootView: View {
     var body: some View {
         NavigationSplitView { sidebar } detail: { detail }
             .frame(minWidth: 900, minHeight: 620)
-            .background(WindowCapture())
             .onChange(of: model.sidebarSelection) { _, value in
                 if let value, !value.hasPrefix("container:"), value != model.state?.folderId {
                     model.perform { try await model.navigate(value) }
@@ -64,8 +63,6 @@ struct RootView: View {
         content
             .navigationTitle(model.currentFolder?.name ?? "育网云")
             .navigationSubtitle(model.state?.activeAccount?.displayName ?? "")
-            .toolbar { mainToolbar }
-            .searchable(text: $model.filter, placement: .toolbar, prompt: "筛选当前目录")
     }
     @ViewBuilder private var content: some View {
         if model.state?.activeAccount == nil {
@@ -157,33 +154,6 @@ struct RootView: View {
                 Spacer()
                 Button { model.showTasks.toggle() } label: { Label("\(model.pendingCount) 项待办", systemImage: model.errorCount > 0 ? "exclamationmark.circle" : "list.bullet.rectangle") }.buttonStyle(.plain)
             }.font(.caption).padding(.horizontal, 16).padding(.vertical, 9)
-        }
-    }
-    @ToolbarContentBuilder private var mainToolbar: some ToolbarContent {
-        ToolbarItemGroup(placement: .navigation) {
-            Button { model.goBack() } label: { Image(systemName: "chevron.left") }.help("后退")
-            Button { model.goForward() } label: { Image(systemName: "chevron.right") }.help("前进")
-        }
-        ToolbarItemGroup {
-            Button { model.perform { _ = try await model.send("refresh") } } label: { Label("刷新", systemImage: "arrow.clockwise") }.keyboardShortcut("r", modifiers: .command).disabled(model.state?.activeAccount == nil)
-            Menu {
-                Button("上传文件…", systemImage: "doc.badge.plus") { model.chooseUpload(folders: false) }
-                Button("上传文件夹…", systemImage: "folder.badge.plus") { model.chooseUpload(folders: true) }
-            } label: { Label("上传", systemImage: "square.and.arrow.up") }.disabled(model.state?.folderId == nil)
-            Button { model.download() } label: { Label("离线下载", systemImage: "arrow.down.circle") }.disabled(model.selection.isEmpty)
-            Button { model.newFolder() } label: { Label("新建文件夹", systemImage: "folder.badge.plus") }.disabled(model.state?.folderId == nil)
-            Menu {
-                Button("打开") { if let entry = model.selectedEntries.first { model.open(entry) } }.disabled(model.selection.isEmpty)
-                Button("另存为…") { model.exportSelected() }.disabled(model.selection.isEmpty)
-                Button("重命名…") { model.renameSelected() }.disabled(model.selection.count != 1)
-                Button("移动到…") { model.showMove = true }.disabled(model.selection.isEmpty)
-                Divider()
-                Button("移到云端回收站…", role: .destructive) { model.deleteSelected() }.disabled(model.selection.isEmpty)
-                Divider()
-                Button(model.state?.paused == true ? "继续同步" : "暂停同步") { model.perform { _ = try await model.send("pause", ["value": model.state?.paused != true]) } }
-                Button(model.state?.manualOffline == true ? "重新联网" : "使用离线模式") { model.perform { _ = try await model.send("offline", ["value": model.state?.manualOffline != true]) } }
-            } label: { Label("更多", systemImage: "ellipsis.circle") }
-            Button { model.showTasks.toggle() } label: { Label("任务", systemImage: "list.bullet.rectangle") }
         }
     }
 }

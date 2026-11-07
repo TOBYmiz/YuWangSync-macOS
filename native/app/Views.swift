@@ -31,7 +31,7 @@ struct RootView: View {
             HStack {
                 if let state = model.state, !state.accounts.isEmpty {
                     Picker("账号", selection: Binding(get: { state.activeAccount?.id ?? "" }, set: { model.activate($0) })) {
-                        Text("选择账号").tag("")
+                        Text("选择账号").tag("").disabled(true)
                         ForEach(state.accounts) { account in Text(account.label).tag(account.id) }
                     }.labelsHidden()
                 } else { Text("育网云").font(.headline) }
@@ -88,7 +88,11 @@ struct RootView: View {
     private var fileList: some View {
         Table(rows, selection: $model.selection, sortOrder: $sortOrder) {
             TableColumn("名称", value: \.name) { entry in
-                Label(entry.name, systemImage: entry.isDirectory ? "folder.fill" : "doc").onTapGesture(count: 2) { model.open(entry) }
+                HStack(spacing: 6) {
+                    Image(nsImage: NSWorkspace.shared.icon(for: entry.isDirectory ? UTType.folder : (UTType(filenameExtension: (entry.name as NSString).pathExtension) ?? UTType.data)))
+                        .resizable().frame(width: 16, height: 16)
+                    Text(entry.name)
+                }.onTapGesture(count: 2) { model.open(entry) }
             }.width(min: 180, ideal: 300)
             TableColumn("大小") { (entry: CloudEntry) in Text(entry.sizeLabel).foregroundStyle(.secondary) }.width(min: 65, ideal: 90, max: 110)
             TableColumn("上传时间") { (entry: CloudEntry) in Text(entry.dateLabel).foregroundStyle(.secondary) }.width(min: 130, ideal: 145, max: 180)
@@ -180,7 +184,7 @@ struct TaskPane: View {
                     Button("导出待传内容…") { model.exportTask() }.disabled(model.selectedOperation?.snapshotPath == nil)
                     Button("关联已创建目录…") { model.linkFolderTask() }.disabled(model.selectedOperation?.kind != "createFolder")
                     Button("取消任务…") { model.cancelTask() }
-                }
+                }.fixedSize()
                 Spacer()
                 if let error = model.selectedOperation?.error { Text(error).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled) }
             }.controlSize(.small).disabled(model.selectedOperation == nil || model.selectedOperation?.state == "completed").padding(10)

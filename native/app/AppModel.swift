@@ -8,7 +8,7 @@ final class AppModel: ObservableObject {
     let bridge = EngineBridge()
     @Published var state: ClientState?
     @Published var transfer: TransferState?
-    @Published var selection = Set<String>()
+    @Published var selection = Set<String>() { didSet { AppDelegate.shared?.updateStatus() } }
     @Published var taskSelection: String?
     @Published var sidebarSelection: String?
     @Published var filter = ""

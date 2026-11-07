@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     private var statusLine: NSMenuItem?
     private var searchItem: NSSearchToolbarItem?
     private var quitting = false
+    private var readyToTerminate = false
     private let model = AppModel.shared
     override init() { super.init(); Self.shared = self; NativeDiagnostics.write("delegate init") }
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -30,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         window.title = "育网云"
         window.contentMinSize = NSSize(width: 900, height: 620)
         window.contentViewController = NSHostingController(rootView: RootView(model: model))
+        window.setContentSize(NSSize(width: 1180, height: 800))
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.delegate = self
@@ -117,7 +119,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     @objc private func moveSelected() { model.showMove = true }
     @objc private func deleteSelected() { model.deleteSelected() }
     @objc private func toggleTasks() { model.showTasks.toggle() }
-    @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func quit() {
+        guard !quitting else { return }
+        Task { await prepareForTermination(); NSApp.terminate(nil) }
+    }
+    @discardableResult func prepareForTermination() async -> Bool {
+        if readyToTerminate { return true }
+        quitting = true
+        NativeDiagnostics.write("preparing application termination")
+        let confirmed = await model.bridge.shutdown()
+        readyToTerminate = true
+        NativeDiagnostics.write("application ready to terminate; engine confirmed=\(confirmed)")
+        return confirmed
+    }
     func updateStatus() {
         let text = "\(model.pendingCount) 项待办 · \(model.errorCount) 项需处理"
         statusLine?.title = text; statusItem?.button?.toolTip = "育网云 · " + text
@@ -175,8 +189,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if quitting { return .terminateNow }; quitting = true
-        Task { await model.bridge.shutdown(); NSApp.reply(toApplicationShouldTerminate: true) }
+        NativeDiagnostics.write("applicationShouldTerminate ready=\(readyToTerminate)")
+        if readyToTerminate { return .terminateNow }
+        if !quitting {
+            quitting = true
+            DispatchQueue.main.async {
+                Task { await self.prepareForTermination(); NSApp.reply(toApplicationShouldTerminate: true) }
+            }
+        }
         return .terminateLater
     }
 }
@@ -210,15 +230,21 @@ enum NativeSelfTest {
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             checks["native-action-to-engine"] = model.state?.operations.contains { $0.entryId == entryID && $0.state == "completed" } == true
+            if let file = model.state?.entries.first(where: { !$0.isDirectory }) { model.selection = [file.id] }
             model.showTasks = true
             try await Task.sleep(nanoseconds: 400_000_000)
-            if let view = AppDelegate.shared?.mainWindow?.contentView, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+            if let view = AppDelegate.shared?.mainWindow?.contentView?.superview, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                 view.cacheDisplay(in: view.bounds, to: bitmap)
-                if let image = bitmap.representation(using: .png, properties: [:]) { try image.write(to: URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("png")) }
+                let opaque = NSImage(size: view.bounds.size, flipped: false) { rectangle in
+                    NSColor.windowBackgroundColor.setFill(); NSBezierPath(rect: rectangle).fill(); bitmap.draw(in: rectangle); return true
+                }
+                if let tiff = opaque.tiffRepresentation, let rendered = NSBitmapImageRep(data: tiff), let image = rendered.representation(using: .png, properties: [:]) {
+                    try image.write(to: URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("png"))
+                }
             }
         } catch let failure { error = failure.localizedDescription + "\n" + model.bridge.stderr }
         NativeDiagnostics.write("self-test requesting engine shutdown")
-        checks["engine-shutdown"] = await model.bridge.shutdown()
+        checks["engine-shutdown"] = await AppDelegate.shared?.prepareForTermination() == true
         let passed = checks.count == 5 && checks.values.allSatisfy { $0 } && error.isEmpty
         do {
             let output = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)

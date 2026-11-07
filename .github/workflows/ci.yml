@@ -1,0 +1,73 @@
+name: Build and verify
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - run: dotnet restore YuWangSync.slnx --locked-mode
+      - run: dotnet test YuWangSync.slnx -c Release --no-restore --logger "trx;LogFileName=windows.trx" --results-directory artifacts/tests
+      - name: Engine and Windows adapter smoke tests
+        shell: pwsh
+        run: |
+          dotnet src/YuWangSync.Engine/bin/Release/net10.0/YuWangSync.Engine.dll --smoke-test --output artifacts/engine-windows.json
+          if ($LASTEXITCODE -ne 0) { throw 'Engine smoke failed' }
+          dotnet src/YuWangSync.Engine/bin/Release/net10.0/YuWangSync.Engine.dll --platform-selftest --output artifacts/platform-windows.json
+          if ($LASTEXITCODE -ne 0) { throw 'Platform smoke failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-validation
+          path: |
+            artifacts/tests/**
+            artifacts/*windows*
+          retention-days: 7
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require Apple Silicon
+        run: test "$(uname -m)" = arm64
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+      - run: dotnet restore YuWangSync.slnx --locked-mode
+      - run: dotnet test YuWangSync.slnx -c Release --no-restore --logger "trx;LogFileName=macos.trx" --results-directory artifacts/tests
+      - name: Build self-contained application
+        run: bash tools/package-macos.sh
+      - name: Keychain and coordinated-file smoke test
+        timeout-minutes: 3
+        run: artifacts/package/YuWangSync.app/Contents/MacOS/Engine/YuWangSync.Engine --platform-selftest --output artifacts/platform-macos.json
+      - name: Launch application bundle with synthetic data
+        timeout-minutes: 3
+        run: |
+          open -n -W artifacts/package/YuWangSync.app --args --ui-selftest --output "$PWD/artifacts/ui-macos.json"
+          python3 -c 'import json; assert json.load(open("artifacts/ui-macos.json"))["passed"]'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-arm64-preview
+          path: |
+            artifacts/*.zip
+            artifacts/*.sha256
+            artifacts/*macos*
+            artifacts/tests/**
+          retention-days: 7

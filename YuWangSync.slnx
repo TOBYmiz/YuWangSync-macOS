@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/YuWangSync.Core/YuWangSync.Core.csproj" />
+    <Project Path="src/YuWangSync.Engine/YuWangSync.Engine.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/YuWangSync.Tests/YuWangSync.Tests.csproj" />
+  </Folder>
+</Solution>

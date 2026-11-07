@@ -1,0 +1,15 @@
+**/bin/
+**/obj/
+artifacts/
+.vs/
+.idea/
+.DS_Store
+*.user
+*.db
+*.db-*
+appsettings.json
+cookies.json
+*.pfx
+*.p12
+*.keychain*
+TestResults/

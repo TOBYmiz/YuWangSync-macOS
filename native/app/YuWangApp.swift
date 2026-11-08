@@ -21,6 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     private var statusItem: NSStatusItem?
     private var statusLine: NSMenuItem?
     private var searchItem: NSSearchToolbarItem?
+    private var toolbarSymbols: [String: (symbol: String, description: String)] = [:]
+    private var appearanceObservation: NSKeyValueObservation?
+    private var colorObservation: NSObjectProtocol?
     private var quitting = false
     private var readyToTerminate = false
     private let model = AppModel.shared
@@ -45,6 +48,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         if !window.setFrameUsingName("YuWangMainWindow") { window.center() }
         window.setFrameAutosaveName("YuWangMainWindow")
         mainWindow = window
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor in self?.refreshToolbarAppearance() }
+        }
+        colorObservation = NotificationCenter.default.addObserver(forName: NSColor.systemColorsDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.refreshToolbarAppearance() }
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         NativeDiagnostics.write("main window created visible=\(window.isVisible)")
@@ -164,8 +173,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         toolbarDefaultItemIdentifiers(toolbar).filter { $0 != .space } + [.space]
     }
     private func toolbarImage(_ symbol: String, description: String) -> NSImage? {
-        NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .regular, scale: .medium))
+        guard let source = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .regular, scale: .medium)) else { return nil }
+        // Use the system accent even for symbols without a palette variant. Keep the native toolbar controls.
+        let image = NSImage(size: source.size, flipped: false) { rect in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            context.saveGState(); context.beginTransparencyLayer(auxiliaryInfo: nil)
+            source.draw(in: rect)
+            NSColor.controlAccentColor.setFill(); rect.fill(using: .sourceIn)
+            context.endTransparencyLayer(); context.restoreGState()
+            return true
+        }
+        image.isTemplate = false; image.accessibilityDescription = description
+        return image
+    }
+    private func setToolbarImage(_ item: NSToolbarItem, symbol: String, description: String) {
+        toolbarSymbols[item.itemIdentifier.rawValue] = (symbol, description)
+        item.image = toolbarImage(symbol, description: description)
+    }
+    func refreshToolbarAppearance() {
+        for item in mainWindow?.toolbar?.items ?? [] {
+            if let spec = toolbarSymbols[item.itemIdentifier.rawValue] { item.image = toolbarImage(spec.symbol, description: spec.description) }
+        }
+        mainWindow?.toolbar?.validateVisibleItems()
     }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         if identifier.rawValue == "search" {
@@ -183,10 +213,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
             let item = NSMenuToolbarItem(itemIdentifier: identifier); let menu = NSMenu()
             item.showsIndicator = false; item.isBordered = true
             if identifier.rawValue == "upload" {
-                item.label = "上传"; item.image = toolbarImage("square.and.arrow.up", description: "上传")
+                item.label = "上传"; setToolbarImage(item, symbol: "square.and.arrow.up", description: "上传")
                 menu.addItem(self.item("上传文件…", #selector(uploadFiles))); menu.addItem(self.item("上传文件夹…", #selector(uploadFolder)))
             } else {
-                item.label = "更多"; item.image = toolbarImage("ellipsis.circle", description: "更多操作")
+                item.label = "更多"; setToolbarImage(item, symbol: "ellipsis.circle", description: "更多操作")
                 menu.addItem(self.item("另存为…", #selector(exportSelected))); menu.addItem(self.item("重命名…", #selector(renameSelected)))
                 menu.addItem(self.item("移动到…", #selector(moveSelected))); menu.addItem(.separator()); menu.addItem(self.item("移到云端回收站…", #selector(deleteSelected)))
                 menu.addItem(.separator()); menu.addItem(self.item("设置…", #selector(settings)))
@@ -200,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         guard let spec = specs[identifier.rawValue] else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier); item.label = spec.0; item.toolTip = spec.0
         item.isBordered = true
-        item.image = toolbarImage(spec.1, description: spec.0); item.target = self; item.action = spec.2; return item
+        setToolbarImage(item, symbol: spec.1, description: spec.0); item.target = self; item.action = spec.2; return item
     }
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
         if item.itemIdentifier.rawValue == "download" { return !model.selection.isEmpty }
@@ -323,6 +353,13 @@ enum NativeSelfTest {
             try capture(window, to: URL(fileURLWithPath: screenshot.path + "-minimum.png"))
             checks["minimum-window-screenshot"] = true
             window.setFrame(originalFrame, display: true)
+            let originalAppearance = window.appearance
+            window.appearance = NSAppearance(named: .darkAqua)
+            AppDelegate.shared?.refreshToolbarAppearance()
+            try await Task.sleep(nanoseconds: 300_000_000)
+            try capture(window, to: URL(fileURLWithPath: screenshot.path + "-dark.png"))
+            window.appearance = originalAppearance
+            AppDelegate.shared?.refreshToolbarAppearance()
             let settings = AppDelegate.shared!.showSettingsWindow()
             try await Task.sleep(nanoseconds: 300_000_000)
             checks["native-settings-window"] = settings.isVisible

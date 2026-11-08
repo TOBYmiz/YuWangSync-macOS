@@ -8,7 +8,7 @@ Mac 应用的 `--ui-selftest --output <json>` 在独立临时目录使用演示�
 
 `--platform-selftest --output <json>` 使用随机测试键检查凭据读写删除，并验证文件快照。Mac 运行真实 Keychain / NSFileCoordinator 桥接，Windows 运行独立 DPAPI 适配。不会读真实账号。
 
-GitHub Actions 的绿色结果只表示对应提交通过所列检查。构建产物为 self-contained arm64 `.app`，包含原生桥接和 SQLite；包结构、ad-hoc 签名及启动自检进入 CI。
+GitHub Actions 的绿色结果只表示对应提交通过所列检查。构建产物为 self-contained arm64 `.app`，包含原生桥接和 SQLite；包结构、代码签名及启动自检进入 CI。主仓库使用固定的预览签名证书，外部构建可回退为 ad-hoc 签名。
 
 原生自检另外导出设置页、关于页截图，并检查随包提供的许可声明。打包同时生成 ZIP 和 DMG；DMG 会经 `hdiutil verify`、只读挂载、应用内容比对及签名复查，并检查 Applications 链接。
 

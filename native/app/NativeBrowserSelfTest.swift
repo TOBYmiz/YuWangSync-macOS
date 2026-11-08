@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor
 enum NativeBrowserSelfTest {
+    private static var eventNumber = 0
     static func find<T: NSView>(_ type: T.Type, in view: NSView?, identifier: String) -> T? {
         guard let view else { return nil }
         if let match = view as? T, match.identifier?.rawValue == identifier { return match }
@@ -23,10 +24,19 @@ enum NativeBrowserSelfTest {
     static func click(_ view: NSView, at point: NSPoint, modifiers: NSEvent.ModifierFlags = []) throws {
         guard let window = view.window else { throw BridgeError(message: "交互自检视图没有窗口。") }
         let location = view.convert(point, to: nil), time = ProcessInfo.processInfo.systemUptime
+        eventNumber += 2
+        if !modifiers.isEmpty, let flags = NSEvent.keyEvent(with: .flagsChanged, location: location, modifierFlags: modifiers,
+            timestamp: time, windowNumber: window.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false,
+            keyCode: modifiers.contains(.command) ? 55 : 56) { NSApp.sendEvent(flags) }
+        defer {
+            if !modifiers.isEmpty, let flags = NSEvent.keyEvent(with: .flagsChanged, location: location, modifierFlags: [],
+                timestamp: time + 0.02, windowNumber: window.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false,
+                keyCode: modifiers.contains(.command) ? 55 : 56) { NSApp.sendEvent(flags) }
+        }
         guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: modifiers, timestamp: time,
-            windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1),
+            windowNumber: window.windowNumber, context: nil, eventNumber: eventNumber, clickCount: 1, pressure: 1),
               let up = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: modifiers, timestamp: time + 0.01,
-            windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 0) else { throw BridgeError(message: "无法创建原生鼠标事件。") }
+            windowNumber: window.windowNumber, context: nil, eventNumber: eventNumber + 1, clickCount: 1, pressure: 0) else { throw BridgeError(message: "无法创建原生鼠标事件。") }
         // Route through the application/window so disclosure buttons and cell hit tests participate.
         NSApp.postEvent(up, atStart: true); NSApp.sendEvent(down)
     }
@@ -109,7 +119,7 @@ enum NativeBrowserSelfTest {
         NativeDiagnostics.write("browser interaction: single click returned")
         checks["file-single-click-selection"] = table.selectedRowIndexes == IndexSet(integer: 0) && test.selection.count == 1
         try click(table, at: point(2), modifiers: .command)
-        NativeDiagnostics.write("browser interaction: command click returned")
+        NativeDiagnostics.write("browser interaction: command click selected=\(table.selectedRowIndexes) ids=\(test.selection.count) multiple=\(table.allowsMultipleSelection)")
         checks["file-command-multiselect"] = table.selectedRowIndexes == IndexSet([0, 2]) && test.selection.count == 2
         try click(table, at: point(0))
         try click(table, at: point(3), modifiers: .shift)

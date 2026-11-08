@@ -75,10 +75,9 @@ struct NativeDirectoryTree: NSViewRepresentable {
                 for parent in snapshot.ancestors(of: id) {
                     if let item = items[parent] { expanded.insert(parent); outline.expandItem(item) }
                 }
-                revealRevision = model.sidebarRevealRevision
                 if let item = items[id] {
                     let row = outline.row(forItem: item)
-                    if row >= 0 { outline.scrollRowToVisible(row) }
+                    if row >= 0 { revealRevision = model.sidebarRevealRevision; outline.scrollRowToVisible(row) }
                 }
             }
             let row = model.sidebarSelection.flatMap { items[$0] }.map { outline.row(forItem: $0) } ?? -1
@@ -147,6 +146,12 @@ struct NativeDirectoryTree: NSViewRepresentable {
 final class BrowserTableView: NSTableView {
     var menuForRow: ((Int) -> NSMenu?)?
     var openSelection: (() -> Void)?
+    override func mouseDown(with event: NSEvent) {
+        let testing = CommandLine.arguments.contains("--ui-selftest")
+        if testing { NativeDiagnostics.write("file mouse flags=\(event.modifierFlags.rawValue) selected-before=\(selectedRowIndexes)") }
+        super.mouseDown(with: event)
+        if testing { NativeDiagnostics.write("file mouse selected-after=\(selectedRowIndexes)") }
+    }
     override func menu(for event: NSEvent) -> NSMenu? {
         let row = row(at: convert(event.locationInWindow, from: nil))
         if row >= 0 && !selectedRowIndexes.contains(row) { selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }

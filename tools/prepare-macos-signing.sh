@@ -25,6 +25,13 @@ trap 'rm -f "$p12"' EXIT
 security create-keychain -p "$password" "$keychain"
 security set-keychain-settings -lut 21600 "$keychain"
 security unlock-keychain -p "$password" "$keychain"
+python3 - "$keychain" <<'PY'
+import shlex
+import subprocess
+import sys
+existing = shlex.split(subprocess.check_output(['security', 'list-keychains', '-d', 'user'], text=True))
+subprocess.run(['security', 'list-keychains', '-d', 'user', '-s', sys.argv[1], *existing], check=True)
+PY
 security import "$p12" -k "$keychain" -P "$MACOS_SIGNING_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
 # Only the runner trusts the preview certificate. End-user system trust is never changed.

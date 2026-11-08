@@ -184,8 +184,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         }
     }
     private func toolbarImage(_ symbol: String, description: String) -> NSImage? {
-        guard let source = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+        guard let symbolImage = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .regular, scale: .medium)) else { return nil }
+        let source = croppedToolbarSymbol(symbolImage)
         guard source.size.width > 0, source.size.height > 0 else { return nil }
         // Equal canvases give the native buttons consistent sizes; fit and center each symbol inside.
         let canvas = NSSize(width: 20, height: 20)
@@ -203,6 +204,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         image.alignmentRect = NSRect(origin: .zero, size: canvas)
         image.isTemplate = false; image.accessibilityDescription = description
         return image
+    }
+    private func croppedToolbarSymbol(_ image: NSImage) -> NSImage {
+        // Symbol canvases contain different optical margins. Measure the visible mask at 4x resolution.
+        let factor: CGFloat = 4
+        let width = max(1, Int(ceil(image.size.width * factor))), height = max(1, Int(ceil(image.size.height * factor)))
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bitmapFormat: [], bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: bitmap), let pixels = bitmap.bitmapData else { return image }
+        let previous = NSGraphicsContext.current
+        NSGraphicsContext.current = context
+        let bounds = NSRect(x: 0, y: 0, width: width, height: height)
+        context.cgContext.clear(bounds); image.draw(in: bounds)
+        NSGraphicsContext.current = previous
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        for y in 0..<height {
+            for x in 0..<width where pixels[y * bitmap.bytesPerRow + x * 4 + 3] > 0 {
+                minX = min(minX, x); minY = min(minY, y); maxX = max(maxX, x); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY,
+              let cropped = bitmap.cgImage?.cropping(to: CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)) else { return image }
+        return NSImage(cgImage: cropped, size: NSSize(width: CGFloat(cropped.width) / factor, height: CGFloat(cropped.height) / factor))
     }
     private func setToolbarImage(_ item: NSToolbarItem, symbol: String, description: String) {
         toolbarSymbols[item.itemIdentifier.rawValue] = (symbol, description)

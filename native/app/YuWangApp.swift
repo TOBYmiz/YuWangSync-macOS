@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         }
         window.makeKeyAndOrderFront(nil)
         removeLegacyToolbarGap(toolbar)
+        refreshToolbarAppearance()
         NSApp.activate(ignoringOtherApps: true)
         NativeDiagnostics.write("main window created visible=\(window.isVisible)")
         installStatusItem()

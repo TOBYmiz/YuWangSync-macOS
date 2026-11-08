@@ -36,7 +36,7 @@ Mac 构建需要包含 SwiftUI SDK 的 Xcode / Apple 命令行工具，用于编
 bash tools/package-macos.sh
 ```
 
-输出同时包含 `artifacts/YuWangSync-macOS-arm64-preview.zip` 和 `.dmg`，各有 SHA-256 校验文件。ZIP 内为 `.app`；DMG 内提供应用与 Applications 链接，可拖入安装。其中 `.app` 自带 .NET 运行时，采用 ad-hoc 签名，尚未做 Developer ID 公证。GitHub Actions 使用标准 Windows 和 ARM64 Mac runner，产物保留七天，不自动发布 Release。
+输出同时包含 `artifacts/YuWangSync-macOS-arm64-preview.zip` 和 `.dmg`，各有 SHA-256 校验文件。ZIP 内为 `.app`；DMG 内提供应用与 Applications 链接，可拖入安装。其中 `.app` 自带 .NET 运行时；主仓库 CI 使用长期复用的自签名证书，尚未做 Developer ID 签名与 Apple 公证。未配置签名密钥的本地或外部分支构建回退为 ad-hoc 签名。GitHub Actions 使用标准 Windows 和 ARM64 Mac runner，产物保留七天，不自动发布 Release。签名与钥匙串更新规则见 [预览签名](docs/signing/README.md)。
 
 关于页显示作者 TOBYmiz 及开源许可列表，完整声明随应用提供；来源见 [开源组件](docs/THIRD-PARTY-NOTICES.md)。
 

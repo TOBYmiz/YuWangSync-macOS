@@ -46,10 +46,10 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$work/app.iconset" -o "$app/Contents/Resources/app.icns"
 chmod +x "$app/Contents/MacOS/YuWangSync" "$app/Contents/MacOS/Engine/YuWangSync.Engine"
-while IFS= read -r -d '' library; do codesign --force --sign - "$library"; done < <(find "$app/Contents/MacOS" -type f -name '*.dylib' -print0)
-codesign --force --sign - "$app/Contents/MacOS/Engine/YuWangSync.Engine"
-codesign --force --sign - "$app/Contents/MacOS/YuWangSync"
-codesign --force --sign - "$app"
+while IFS= read -r -d '' library; do bash "$root/tools/sign-macos.sh" "$library" "io.github.TOBYmiz.YuWangSync-macOS.$(basename "$library")"; done < <(find "$app/Contents/MacOS" -type f -name '*.dylib' -print0)
+bash "$root/tools/sign-macos.sh" "$app/Contents/MacOS/Engine/YuWangSync.Engine" io.github.TOBYmiz.YuWangSync-macOS.engine
+bash "$root/tools/sign-macos.sh" "$app/Contents/MacOS/YuWangSync" io.github.TOBYmiz.YuWangSync-macOS
+bash "$root/tools/sign-macos.sh" "$app" io.github.TOBYmiz.YuWangSync-macOS
 codesign --verify --deep --strict "$app"
 plutil -lint "$app/Contents/Info.plist"
 ditto -c -k --sequesterRsrc --keepParent "$app" "$root/artifacts/YuWangSync-macOS-arm64-preview.zip"
@@ -61,7 +61,7 @@ ln -s /Applications "$image_root/Applications"
 cat > "$image_root/安装说明.txt" <<'INSTALL'
 将 YuWangSync.app 拖入 Applications 即可安装。
 适用 macOS 14+、Apple Silicon。应用自带运行时。
-此版本为预览版，采用 ad-hoc 签名，尚未完成 Developer ID 签名与 Apple 公证。
+此版本为预览版，尚未完成 Developer ID 签名与 Apple 公证。
 INSTALL
 dmg="$root/artifacts/YuWangSync-macOS-arm64-preview.dmg"
 hdiutil create -ov -volname "育网云" -srcfolder "$image_root" -format UDZO -fs HFS+ "$dmg"

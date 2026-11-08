@@ -14,6 +14,7 @@ public static class Program
         Console.InputEncoding = new UTF8Encoding(false); Console.OutputEncoding = new UTF8Encoding(false);
         string? Option(string name) { var i = Array.IndexOf(args, name); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
         if (args.Contains("--platform-selftest")) return await SelfTests.PlatformAsync(Option("--output"));
+        if (args.Contains("--keychain-probe")) return await SelfTests.KeychainProbeAsync(Option("--keychain-probe"), Option("--key"));
         var demo = args.Contains("--demo") || args.Contains("--smoke-test");
         var data = Option("--data-root") ?? (demo ? Path.Combine(Path.GetTempPath(), "YuWangSync-demo-" + Guid.NewGuid().ToString("N")) : null);
         try
@@ -313,6 +314,23 @@ public sealed class EngineHost : IAsyncDisposable
 
 internal static class SelfTests
 {
+    public static async Task<int> KeychainProbeAsync(string? action, string? key)
+    {
+        // Accept only synthetic CI keys. Never dump values or touch real account credentials.
+        if (!OperatingSystem.IsMacOS() || key is null || !key.StartsWith("signing-selftest:", StringComparison.Ordinal)
+            || action is not ("write" or "read" or "delete")) return 2;
+        try
+        {
+            if (Native.DisableKeychainUI() != 0) return 3;
+            var store = new MacSecretStore();
+            const string value = "YuWangSync synthetic signing probe";
+            if (action == "write") await store.SetAsync(key, value);
+            else if (action == "read" && await store.GetAsync(key) != value) return 4;
+            else if (action == "delete") await store.DeleteAsync(key);
+            Console.WriteLine("Keychain signing probe passed: " + action); return 0;
+        }
+        catch (IOException) { Console.Error.WriteLine("Keychain signing probe failed; authorization was not retained."); return 1; }
+    }
     public static async Task<int> PlatformAsync(string? output)
     {
         var root = Path.Combine(Path.GetTempPath(), "YuWangSync-platform-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);

@@ -50,8 +50,17 @@ jobs:
           cache: true
           cache-dependency-path: '**/packages*.lock.json'
       - run: dotnet restore YuWangSync.slnx --locked-mode
+      - name: Load persistent macOS signing identity
+        env:
+          YUWANG_REQUIRE_SIGNING: ${{ github.repository == 'TOBYmiz/YuWangSync-macOS' && github.event_name != 'pull_request' && '1' || '0' }}
+          MACOS_SIGNING_CERTIFICATE_P12: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: bash tools/prepare-macos-signing.sh
       - name: Build self-contained application
         run: bash tools/package-macos.sh
+      - name: Verify Keychain trust across restarts and changed signatures
+        timeout-minutes: 4
+        run: python3 tools/verify-keychain-signing.py
       - run: dotnet test YuWangSync.slnx -c Release --no-restore --logger "trx;LogFileName=macos.trx" --results-directory artifacts/tests
       - name: Keychain and coordinated-file smoke test
         timeout-minutes: 3
@@ -96,3 +105,9 @@ jobs:
             artifacts/YuWangSync-macOS-arm64-preview.dmg
             artifacts/YuWangSync-macOS-arm64-preview.dmg.sha256
           retention-days: 7
+      - name: Remove runner signing keychain
+        if: always()
+        run: |
+          if test -n "${YUWANG_SIGNING_KEYCHAIN:-}"; then
+            security delete-keychain "$YUWANG_SIGNING_KEYCHAIN"
+          fi

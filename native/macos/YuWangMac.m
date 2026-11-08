@@ -40,6 +40,13 @@ __attribute__((visibility("default"))) int yw_secret_delete(const char *key) {
     @autoreleasepool { return (int)SecItemDelete((__bridge CFDictionaryRef)query(key)); }
 }
 __attribute__((visibility("default"))) void yw_free(void *pointer) { free(pointer); }
+// Used by the cross-process CI probe: an unexpected authorization must fail, not hang on a dialog.
+__attribute__((visibility("default"))) int yw_keychain_disable_ui(void) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return (int)SecKeychainSetUserInteractionAllowed(false);
+#pragma clang diagnostic pop
+}
 __attribute__((visibility("default"))) int yw_snapshot_copy(const char *source, const char *destination) {
     @autoreleasepool {
         NSURL *from = [NSURL fileURLWithPath:[NSString stringWithUTF8String:source]];

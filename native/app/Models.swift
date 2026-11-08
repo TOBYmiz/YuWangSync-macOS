@@ -78,6 +78,13 @@ struct SidebarNode: Identifiable {
     let symbol: String
     let children: [SidebarNode]?
     var unloaded = false
+    var isDiskRoot = false
+}
+struct FavoriteFolder: Codable, Identifiable, Equatable {
+    let accountId: String
+    let entryId: String
+    let name: String
+    var id: String { accountId + ":" + entryId }
 }
 struct BridgeError: LocalizedError {
     let message: String

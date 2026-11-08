@@ -21,6 +21,11 @@ final class AppModel: ObservableObject {
     @Published var collisionIDs: [String] = []
     @Published var showCollisions = false
     @Published var showMove = false
+    @Published private(set) var favoriteFolders: [FavoriteFolder]
+    @Published var favoritesExpanded: Bool {
+        didSet { preferences.set(favoritesExpanded, forKey: "sidebar.favoritesExpanded") }
+    }
+    private let preferences: UserDefaults
     private var started = false
     private let networkMonitor = NWPathMonitor()
     private var networkCost = "unknown"
@@ -33,6 +38,48 @@ final class AppModel: ObservableObject {
     var selectedOperation: CloudOperation? { state?.operations.first { $0.id == taskSelection } }
     var pendingCount: Int { state?.operations.filter { !$0.isTerminal }.count ?? 0 }
     var errorCount: Int { state?.operations.filter { ["blocked", "failed", "uncertain"].contains($0.state) }.count ?? 0 }
+
+    init(preferences: UserDefaults? = nil) {
+        // Demo and CI must never read or change the user's saved sidebar.
+        let demo = CommandLine.arguments.contains("--demo") || CommandLine.arguments.contains("--ui-selftest")
+        let defaults = preferences ?? (demo ? UserDefaults(suiteName: "io.github.TOBYmiz.YuWangSync-macOS.demo")! : .standard)
+        self.preferences = defaults
+        favoriteFolders = defaults.data(forKey: "sidebar.favorites").flatMap { try? JSONDecoder().decode([FavoriteFolder].self, from: $0) } ?? []
+        favoritesExpanded = defaults.object(forKey: "sidebar.favoritesExpanded") as? Bool ?? true
+    }
+    var visibleFavorites: [FavoriteFolder] { favoriteFolders.filter { $0.accountId == state?.activeAccount?.id } }
+    func favoriteEntry(_ favorite: FavoriteFolder) -> CloudEntry? {
+        guard favorite.accountId == state?.activeAccount?.id else { return nil }
+        return state?.entries.first { $0.id == favorite.entryId && $0.accountId == favorite.accountId && $0.isDirectory }
+    }
+    func isFavorite(_ entry: CloudEntry) -> Bool {
+        favoriteFolders.contains { $0.accountId == entry.accountId && $0.entryId == entry.id }
+    }
+    func toggleFavorite(_ entry: CloudEntry) {
+        guard entry.isDirectory, entry.accountId == state?.activeAccount?.id else { return }
+        if isFavorite(entry) { favoriteFolders.removeAll { $0.accountId == entry.accountId && $0.entryId == entry.id } }
+        else { favoriteFolders.append(FavoriteFolder(accountId: entry.accountId, entryId: entry.id, name: entry.name)); favoritesExpanded = true }
+        saveFavorites()
+    }
+    func removeFavorite(_ favorite: FavoriteFolder) {
+        favoriteFolders.removeAll { $0.id == favorite.id }; saveFavorites()
+    }
+    private func saveFavorites() {
+        if let data = try? JSONEncoder().encode(favoriteFolders) { preferences.set(data, forKey: "sidebar.favorites") }
+    }
+    func openFavorite(_ favorite: FavoriteFolder) {
+        guard let entry = favoriteEntry(favorite) else { return }
+        // Use normal navigation: the engine owns disk/folder session context and locking.
+        perform { try await self.navigate(entry.id) }
+    }
+    func favoritePath(_ favorite: FavoriteFolder) -> String {
+        var names: [String] = [], seen = Set<String>(), entry = favoriteEntry(favorite)
+        while let current = entry, seen.insert(current.id).inserted {
+            names.append(current.name)
+            entry = state?.entries.first { $0.id == current.parentId && $0.accountId == favorite.accountId }
+        }
+        return names.reversed().joined(separator: " / ")
+    }
 
     func start() {
         guard !started else { return }; started = true
@@ -214,7 +261,7 @@ final class AppModel: ObservableObject {
             var next = seen; let fresh = next.insert(entry.id).inserted
             let children = fresh ? state.entries.filter { $0.parentId == entry.id && $0.isDirectory }.map { folder($0, next) } : []
             return SidebarNode(id: entry.id, title: entry.name, symbol: entry.isDiskRoot ? "externaldrive" : "folder", children: children.isEmpty ? nil : children,
-                               unloaded: entry.lastListed == nil && (entry.isDiskRoot || entry.remoteId != 0))
+                               unloaded: entry.lastListed == nil && (entry.isDiskRoot || entry.remoteId != 0), isDiskRoot: entry.isDiskRoot)
         }
         func container(_ node: DiskNode, _ seen: Set<UInt64>) -> SidebarNode {
             var next = seen; let fresh = next.insert(node.id).inserted

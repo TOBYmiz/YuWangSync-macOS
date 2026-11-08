@@ -253,6 +253,47 @@ enum NativeSelfTest {
             checks["native-window"] = AppDelegate.shared?.mainWindow?.isVisible == true
             checks["native-table-data"] = state.entries.contains { !$0.isDirectory }
             checks["native-sidebar-data"] = !model.sidebarNodes.isEmpty
+            func diskNodes(_ nodes: [SidebarNode]) -> [SidebarNode] {
+                nodes.flatMap { ($0.isDiskRoot ? [$0] : []) + diskNodes($0.children ?? []) }
+            }
+            let disks = diskNodes(model.sidebarNodes)
+            checks["sidebar-drives-collapsible"] = !disks.isEmpty && disks.count == state.entries.filter(\.isDiskRoot).count
+            // Test saved folder references with an isolated domain, never real preferences.
+            guard let favoriteTarget = state.entries.first(where: { $0.isDirectory && !$0.isDiskRoot && $0.id != folder }) else {
+                throw BridgeError(message: "收藏自检缺少演示目录。")
+            }
+            let suiteName = "YuWangSync.favorites-selftest." + UUID().uuidString
+            let defaults = UserDefaults(suiteName: suiteName)!
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let preferences = AppModel(preferences: defaults); preferences.state = state
+            checks["favorites-default-expanded"] = preferences.favoritesExpanded && preferences.visibleFavorites.isEmpty
+            preferences.toggleFavorite(favoriteTarget)
+            let favorite = preferences.visibleFavorites.first!
+            preferences.favoritesExpanded = false
+            let restored = AppModel(preferences: defaults); restored.state = state
+            checks["favorites-persist"] = restored.visibleFavorites == [favorite] && !restored.favoritesExpanded
+            var otherState = try await model.send("state")
+            otherState["activeAccount"] = ["id": "other-account", "server": "https://example.invalid", "username": "other", "displayName": "其他账号"]
+            restored.state = try JSONDecoder().decode(ClientState.self, from: JSONSerialization.data(withJSONObject: otherState))
+            restored.toggleFavorite(favoriteTarget)
+            checks["favorites-account-isolation"] = restored.visibleFavorites.isEmpty && restored.favoriteFolders == [favorite] && restored.favoriteEntry(favorite) == nil
+            restored.state = state
+            restored.toggleFavorite(favoriteTarget)
+            checks["favorites-remove"] = restored.visibleFavorites.isEmpty && AppModel(preferences: defaults).favoriteFolders.isEmpty
+            restored.toggleFavorite(favoriteTarget)
+            var unavailableState = try await model.send("state")
+            unavailableState["entries"] = (unavailableState["entries"] as? [[String: Any]] ?? []).filter { $0["id"] as? String != favorite.entryId }
+            restored.state = try JSONDecoder().decode(ClientState.self, from: JSONSerialization.data(withJSONObject: unavailableState))
+            checks["favorites-unavailable-retained"] = restored.visibleFavorites == [favorite] && restored.favoriteEntry(favorite) == nil
+            if model.isFavorite(favoriteTarget) { model.toggleFavorite(favoriteTarget) }
+            model.toggleFavorite(favoriteTarget)
+            model.openFavorite(model.visibleFavorites.first { $0.entryId == favoriteTarget.id }!)
+            for _ in 0..<50 {
+                if model.state?.folderId == favoriteTarget.id { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            checks["favorites-engine-navigation"] = model.state?.folderId == favoriteTarget.id && model.sidebarSelection == favoriteTarget.id
+            try await model.navigate(folder)
             let result = try await model.send("createFolder", ["parentId": folder, "name": "原生界面自检目录"])
             guard let entryID = result["entryId"] as? String else { throw BridgeError(message: "未返回目录实体。") }
             for _ in 0..<50 {
@@ -265,6 +306,12 @@ enum NativeSelfTest {
             try await Task.sleep(nanoseconds: 400_000_000)
             guard let window = AppDelegate.shared?.mainWindow else { throw BridgeError(message: "原生主窗口丢失。") }
             let screenshot = URL(fileURLWithPath: path).deletingPathExtension()
+            model.favoritesExpanded = false
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try capture(window, to: URL(fileURLWithPath: screenshot.path + "-favorites-collapsed.png"))
+            checks["favorites-collapsed-screenshot"] = !model.favoritesExpanded
+            model.favoritesExpanded = true
+            try await Task.sleep(nanoseconds: 200_000_000)
             chrome["default"] = inspectChrome(window, suffix: "default", checks: &checks)
             try capture(window, to: screenshot.appendingPathExtension("png"))
             checks["full-window-screenshot"] = true
@@ -288,7 +335,7 @@ enum NativeSelfTest {
         } catch let failure { error = failure.localizedDescription + "\n" + model.bridge.stderr }
         NativeDiagnostics.write("self-test requesting engine shutdown")
         checks["engine-shutdown"] = await AppDelegate.shared?.prepareForTermination() == true
-        let passed = checks.count == 16 && checks.values.allSatisfy { $0 } && error.isEmpty
+        let passed = checks.count == 24 && checks.values.allSatisfy { $0 } && error.isEmpty
         do {
             let output = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: ["passed": passed, "nativeControls": true, "checks": checks, "windowChrome": chrome, "error": error], options: [.prettyPrinted, .sortedKeys])

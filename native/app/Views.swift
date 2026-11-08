@@ -54,6 +54,8 @@ struct RootView: View {
                 }
             }.listStyle(.sidebar)
             Divider()
+            FavoritesPane(model: model)
+            Divider()
             VStack(alignment: .leading, spacing: 5) {
                 Label(model.state?.connectionStatus ?? "正在启动…", systemImage: model.state?.offline == true ? "wifi.slash" : "checkmark.icloud")
                     .font(.caption).foregroundStyle(.secondary)
@@ -109,6 +111,9 @@ struct RootView: View {
         Button("离线下载") { model.download() }
         Button("另存为…") { model.exportSelected() }
         Button("在访达中显示") { model.revealSelected() }.disabled(model.selectedEntries.first?.localPath == nil)
+        if model.selectedEntries.count == 1, let entry = model.selectedEntries.first, entry.isDirectory {
+            Button(model.isFavorite(entry) ? "取消收藏" : "添加到收藏") { model.toggleFavorite(entry) }
+        }
         Divider()
         Button("重命名…") { model.renameSelected() }
         Button("移动到…") { model.showMove = true }
@@ -162,10 +167,10 @@ struct RootView: View {
 struct SidebarBranch: View {
     @ObservedObject var model: AppModel
     let node: SidebarNode
-    @State private var expanded = false
+    @State private var expanded = false // Drives and folders start collapsed, including preloaded branches.
     @State private var loading = false
     var body: some View {
-        if node.unloaded || !(node.children ?? []).isEmpty {
+        if node.isDiskRoot || node.unloaded || !(node.children ?? []).isEmpty {
             DisclosureGroup(isExpanded: $expanded) {
                 ForEach(node.children ?? []) { child in SidebarBranch(model: model, node: child) }
                 if node.unloaded {
@@ -174,12 +179,21 @@ struct SidebarBranch: View {
                     } else {
                         Button("加载子目录") { load() }.buttonStyle(.plain).foregroundStyle(.secondary)
                     }
+                } else if node.isDiskRoot && (node.children ?? []).isEmpty {
+                    Text("没有子文件夹").font(.caption).foregroundStyle(.secondary)
                 }
-            } label: { Label(node.title, systemImage: node.symbol) }
+            } label: { label }
             .tag(node.id)
             .onChange(of: expanded) { _, value in if value && node.unloaded { load() } }
         } else {
-            Label(node.title, systemImage: node.symbol).tag(node.id)
+            label.tag(node.id)
+        }
+    }
+    private var label: some View {
+        Label(node.title, systemImage: node.symbol).contextMenu {
+            if let entry = model.state?.entries.first(where: { $0.id == node.id && $0.isDirectory }) {
+                Button(model.isFavorite(entry) ? "取消收藏" : "添加到收藏") { model.toggleFavorite(entry) }
+            }
         }
     }
     private func load() {
@@ -189,6 +203,59 @@ struct SidebarBranch: View {
             do { _ = try await model.send("loadFolder", ["folderId": node.id]) }
             catch { model.errorMessage = error.localizedDescription }
         }
+    }
+}
+
+struct FavoritesPane: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Button { model.favoritesExpanded.toggle() } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: model.favoritesExpanded ? "chevron.down" : "chevron.right").font(.caption2)
+                            .frame(width: 10)
+                        Label("收藏", systemImage: "star")
+                        Spacer(minLength: 0)
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel(model.favoritesExpanded ? "收起收藏" : "展开收藏")
+                    .accessibilityValue(model.favoritesExpanded ? "已展开" : "已收起")
+                Button {
+                    if let entry = model.currentFolder { model.toggleFavorite(entry) }
+                } label: {
+                    Image(systemName: model.currentFolder.map { model.isFavorite($0) } == true ? "star.fill" : "plus")
+                }.buttonStyle(.borderless).disabled(model.currentFolder == nil)
+                    .help(model.currentFolder.map { model.isFavorite($0) } == true ? "取消收藏当前文件夹" : "收藏当前文件夹")
+                    .accessibilityLabel(model.currentFolder.map { model.isFavorite($0) } == true ? "取消收藏当前文件夹" : "收藏当前文件夹")
+            }.font(.callout).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.vertical, 10)
+            if model.favoritesExpanded {
+                if model.visibleFavorites.isEmpty {
+                    Text("点 + 收藏当前文件夹，也可右键添加。")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 12)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(model.visibleFavorites) { favorite in
+                                let entry = model.favoriteEntry(favorite)
+                                Button { model.openFavorite(favorite) } label: {
+                                    HStack(spacing: 7) {
+                                        Image(systemName: entry == nil ? "folder.badge.questionmark" : (entry?.isDiskRoot == true ? "externaldrive" : "folder"))
+                                            .foregroundStyle(.secondary)
+                                        Text(entry?.name ?? favorite.name).lineLimit(1).truncationMode(.middle)
+                                        Spacer(minLength: 0)
+                                    }.padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
+                                        .background(model.state?.folderId == favorite.entryId ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+                                }.buttonStyle(.plain)
+                                    .help(entry == nil ? "目录暂不可用，可右键移除收藏。" : model.favoritePath(favorite))
+                                    .accessibilityLabel((entry?.name ?? favorite.name) + (entry == nil ? "，目录暂不可用" : "，收藏文件夹"))
+                                    .contextMenu { Button("移除收藏") { model.removeFavorite(favorite) } }
+                            }
+                        }.padding(.horizontal, 6)
+                    }.frame(height: min(CGFloat(model.visibleFavorites.count) * 32, 180)).padding(.bottom, 8)
+                }
+            }
+        }.accessibilityIdentifier("sidebar-favorites")
     }
 }
 

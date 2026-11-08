@@ -72,8 +72,17 @@ jobs:
           open -n --stdout "$PWD/artifacts/ui-macos-stdout.log" --stderr "$PWD/artifacts/ui-macos-stderr.log" artifacts/package/YuWangSync.app --args --ui-selftest --output "$PWD/artifacts/ui-macos.json"
           for attempt in {1..75}; do
             test -f artifacts/ui-macos.json && break
+            if (( attempt > 5 )) && ! pgrep -x YuWangSync >/dev/null; then break; fi
             sleep 1
           done
+          if ! test -f artifacts/ui-macos.json; then
+            if pid="$(pgrep -x YuWangSync)"; then sample "$pid" 1 -file artifacts/ui-macos-sample.log || true; fi
+            python3 - <<'PY'
+          import pathlib, shutil
+          for report in (pathlib.Path.home() / 'Library/Logs/DiagnosticReports').glob('YuWangSync*.ips'):
+              shutil.copy2(report, pathlib.Path('artifacts') / ('crash-macos-' + report.name))
+          PY
+          fi
           for diagnostic in artifacts/ui-macos*.log; do
             if test -f "$diagnostic"; then echo "--- $diagnostic"; cat "$diagnostic"; fi
           done
@@ -92,6 +101,7 @@ jobs:
             artifacts/*macos*.json
             artifacts/*macos*.png
             artifacts/*macos*.log
+            artifacts/*macos*.ips
             artifacts/tests/**
           retention-days: 7
       - uses: actions/upload-artifact@v7.0.2

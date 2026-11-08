@@ -30,7 +30,9 @@ enum NativeBrowserSelfTest {
         NSApp.postEvent(up, atStart: true); view.mouseDown(with: down)
     }
     static func run(model: AppModel, output: String) async throws -> [String: Bool] {
+        NativeDiagnostics.write("browser interaction: entered")
         try await Task.sleep(nanoseconds: 150_000_000)
+        NativeDiagnostics.write("browser interaction: initial view ready")
         guard let state = model.state, let root = model.currentFolder,
               let mainOutline = find(NSOutlineView.self, in: AppDelegate.shared?.mainWindow?.contentView, identifier: "cloud-outline") else {
             throw BridgeError(message: "原生目录树未挂载。")
@@ -66,6 +68,7 @@ enum NativeBrowserSelfTest {
         }
         let started = ProcessInfo.processInfo.systemUptime
         test.state = snapshot(entries); test.sidebarSelection = root.id
+        NativeDiagnostics.write("browser interaction: indexed 10000 directories")
         checks["large-tree-index"] = test.browserIndex.directories.rows.count == 10_004 && ProcessInfo.processInfo.systemUptime - started < 2
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1060, height: 650), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.title = "目录与选择交互自检"
@@ -74,33 +77,41 @@ enum NativeBrowserSelfTest {
             Divider()
             NativeFileTable(model: test)
         }.frame(width: 1060, height: 650))
+        NativeDiagnostics.write("browser interaction: mounting native controls")
         window.center(); window.makeKeyAndOrderFront(nil)
         defer { window.close(); AppDelegate.shared?.mainWindow?.makeKeyAndOrderFront(nil) }
         try await Task.sleep(nanoseconds: 250_000_000)
+        NativeDiagnostics.write("browser interaction: controls mounted")
         guard let outline = find(NSOutlineView.self, in: window.contentView, identifier: "cloud-outline"),
               let table = find(NSTableView.self, in: window.contentView, identifier: "cloud-files") else { throw BridgeError(message: "原生文件浏览控件未就绪。") }
         checks["two-drive-groups-collapsed"] = outline.numberOfRows == 2
         let drive = outline.item(atRow: 0)!
         let outlineStart = ProcessInfo.processInfo.systemUptime
         for _ in 0..<40 { outline.expandItem(drive); outline.collapseItem(drive) }
+        NativeDiagnostics.write("browser interaction: rapid drive collapse finished")
         checks["rapid-drive-collapse"] = outline.numberOfRows == 2 && ProcessInfo.processInfo.systemUptime - outlineStart < 3
         // Disclosure click must expand the group without starting folder navigation.
         let disclosure = outline.frameOfOutlineCell(atRow: 0)
         try click(outline, at: NSPoint(x: disclosure.midX, y: disclosure.midY))
+        NativeDiagnostics.write("browser interaction: disclosure mouse click returned")
         checks["drive-disclosure-click"] = outline.isItemExpanded(drive) && outline.numberOfRows == 3
         if let nested = outline.item(atRow: 1) { outline.expandItem(nested) }
         let disk = outline.item(atRow: 2)!
         let collapseStart = ProcessInfo.processInfo.systemUptime
         for _ in 0..<10 { outline.expandItem(disk); outline.collapseItem(disk) }
+        NativeDiagnostics.write("browser interaction: large drive collapse finished")
         checks["large-drive-collapse"] = outline.numberOfRows == 4 && ProcessInfo.processInfo.systemUptime - collapseStart < 5
         checks["drive-collapse-no-navigation"] = test.state?.folderId == root.id && test.errorMessage == nil
         func point(_ row: Int) -> NSPoint { NSPoint(x: 65, y: table.rect(ofRow: row).midY) }
         try click(table, at: point(0))
+        NativeDiagnostics.write("browser interaction: single click returned")
         checks["file-single-click-selection"] = table.selectedRowIndexes == IndexSet(integer: 0) && test.selection.count == 1
         try click(table, at: point(2), modifiers: .command)
+        NativeDiagnostics.write("browser interaction: command click returned")
         checks["file-command-multiselect"] = table.selectedRowIndexes == IndexSet([0, 2]) && test.selection.count == 2
         try click(table, at: point(0))
         try click(table, at: point(3), modifiers: .shift)
+        NativeDiagnostics.write("browser interaction: shift click returned")
         checks["file-shift-range-selection"] = table.selectedRowIndexes == IndexSet(integersIn: 0...3) && test.selection.count == 4
         let selected = test.selection
         // Background metadata/preload updates must neither clear selection nor expand collapsed drives.
@@ -109,10 +120,12 @@ enum NativeBrowserSelfTest {
             localPath: nil, lastListed: stamp, status: "云端"))
         test.state = snapshot(entries)
         try await Task.sleep(nanoseconds: 200_000_000)
+        checks["drive-collapse-no-navigation"] = test.state?.folderId == root.id && test.errorMessage == nil
         checks["file-selection-survives-refresh"] = test.selection == selected && table.selectedRowIndexes.count == 4
         checks["collapsed-drive-survives-refresh"] = !outline.isItemExpanded(disk) && outline.isItemExpanded(drive)
         let repeatStart = ProcessInfo.processInfo.systemUptime
         for index in 0..<20 { try click(table, at: point(index % 5)) }
+        NativeDiagnostics.write("browser interaction: repeated clicks finished")
         checks["rapid-file-selection-responsive"] = test.selection.count == 1 && ProcessInfo.processInfo.systemUptime - repeatStart < 5
         outline.collapseItem(nil, collapseChildren: true)
         let image = URL(fileURLWithPath: output).deletingPathExtension().path + "-interaction.png"

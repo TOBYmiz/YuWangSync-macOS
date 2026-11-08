@@ -146,11 +146,17 @@ struct NativeDirectoryTree: NSViewRepresentable {
 final class BrowserTableView: NSTableView {
     var menuForRow: ((Int) -> NSMenu?)?
     var openSelection: (() -> Void)?
+    var trackingFinished: (() -> Void)?
+    private(set) var trackingMouse = false
     override func mouseDown(with event: NSEvent) {
         let testing = CommandLine.arguments.contains("--ui-selftest")
-        if testing { NativeDiagnostics.write("file mouse flags=\(event.modifierFlags.rawValue) selected-before=\(selectedRowIndexes)") }
+        trackingMouse = true
+        defer {
+            trackingMouse = false; trackingFinished?()
+            if testing { NativeDiagnostics.write("file mouse selected-after=\(Array(selectedRowIndexes))") }
+        }
+        if testing { NativeDiagnostics.write("file mouse flags=\(event.modifierFlags.rawValue) selected-before=\(Array(selectedRowIndexes))") }
         super.mouseDown(with: event)
-        if testing { NativeDiagnostics.write("file mouse selected-after=\(selectedRowIndexes)") }
     }
     override func menu(for event: NSEvent) -> NSMenu? {
         let row = row(at: convert(event.locationInWindow, from: nil))
@@ -181,6 +187,9 @@ struct NativeFileTable: NSViewRepresentable {
         table.dataSource = context.coordinator; table.delegate = context.coordinator
         table.target = context.coordinator; table.doubleAction = #selector(Coordinator.openClicked)
         table.openSelection = { [weak coordinator = context.coordinator] in coordinator?.openSelected() }
+        table.trackingFinished = { [weak coordinator = context.coordinator] in
+            if let coordinator { coordinator.update(coordinator.model) }
+        }
         table.menuForRow = { [weak coordinator = context.coordinator] row in coordinator?.menu(row) }
         context.coordinator.table = table
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
@@ -198,7 +207,7 @@ struct NativeFileTable: NSViewRepresentable {
         init(_ model: AppModel) { self.model = model }
         func update(_ model: AppModel) {
             self.model = model
-            guard let table else { return }
+            guard let table, !table.trackingMouse else { return }
             applying = true; defer { applying = false }
             let entries = model.fileRows
             let changedFolder = folderID != model.state?.folderId

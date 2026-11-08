@@ -108,6 +108,7 @@ jobs:
       - name: Remove runner signing keychain
         if: always()
         run: |
-          if test -n "${YUWANG_SIGNING_KEYCHAIN:-}"; then
-            security delete-keychain "$YUWANG_SIGNING_KEYCHAIN"
+          keychain="${YUWANG_SIGNING_KEYCHAIN:-$RUNNER_TEMP/yuwang-signing/signing.keychain-db}"
+          if test -f "$keychain"; then
+            security delete-keychain "$keychain"
           fi

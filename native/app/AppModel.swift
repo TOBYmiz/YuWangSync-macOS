@@ -40,7 +40,8 @@ final class AppModel: ObservableObject {
     var currentFolder: CloudEntry? { guard let id = state?.folderId else { return nil }; return browserIndex.entries[id] }
     var selectedEntries: [CloudEntry] { selection.compactMap { browserIndex.entries[$0] } }
     var fileRows: [CloudEntry] {
-        (browserIndex.filesByParent[state?.folderId ?? ""] ?? []).filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }
+        let entries = browserIndex.filesByParent[state?.folderId ?? ""] ?? []
+        return filter.isEmpty ? entries : entries.filter { $0.name.localizedCaseInsensitiveContains(filter) }
     }
     var selectedOperation: CloudOperation? { state?.operations.first { $0.id == taskSelection } }
     var pendingCount: Int { state?.operations.filter { !$0.isTerminal }.count ?? 0 }

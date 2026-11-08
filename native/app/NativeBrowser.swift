@@ -201,6 +201,7 @@ struct NativeFileTable: NSViewRepresentable {
         var model: AppModel
         weak var table: BrowserTableView?
         var rows: [CloudEntry] = [], source: [CloudEntry] = []
+        private var rowByID: [String: Int] = [:]
         private var folderID: String?
         private var applying = false
         private var icons: [String: NSImage] = [:]
@@ -234,10 +235,12 @@ struct NativeFileTable: NSViewRepresentable {
                 }
                 return a.id < b.id
             }
+            rowByID.removeAll(keepingCapacity: true)
+            for (index, entry) in rows.enumerated() { rowByID[entry.id] = index }
         }
         private func restoreSelection() {
             guard let table else { return }
-            let selected = IndexSet(rows.indices.filter { model.selection.contains(rows[$0].id) })
+            let selected = IndexSet(model.selection.compactMap { rowByID[$0] })
             if selected != table.selectedRowIndexes { table.selectRowIndexes(selected, byExtendingSelection: false) }
         }
         func numberOfRows(in tableView: NSTableView) -> Int { rows.count }

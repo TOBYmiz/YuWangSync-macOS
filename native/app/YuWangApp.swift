@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
             Task { @MainActor in self?.refreshToolbarAppearance() }
         }
         window.makeKeyAndOrderFront(nil)
+        removeLegacyToolbarGap(toolbar)
         NSApp.activate(ignoringOtherApps: true)
         NativeDiagnostics.write("main window created visible=\(window.isVisible)")
         installStatusItem()
@@ -167,23 +168,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [NSToolbarItem.Identifier("back"), NSToolbarItem.Identifier("forward"), NSToolbarItem.Identifier("refresh"), .flexibleSpace,
          NSToolbarItem.Identifier("upload"), NSToolbarItem.Identifier("download"), NSToolbarItem.Identifier("newFolder"),
-         .space, NSToolbarItem.Identifier("tasks"), NSToolbarItem.Identifier("more"), .space, NSToolbarItem.Identifier("search")]
+         NSToolbarItem.Identifier("tasks"), NSToolbarItem.Identifier("more"), .space, NSToolbarItem.Identifier("search")]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         toolbarDefaultItemIdentifiers(toolbar).filter { $0 != .space } + [.space]
     }
+    private func removeLegacyToolbarGap(_ toolbar: NSToolbar) {
+        // Upgrade the old saved layout too, without resetting the user's other customizations.
+        let items = toolbar.items
+        guard items.count >= 3 else { return }
+        for index in (1..<(items.count - 1)).reversed() {
+            if items[index].itemIdentifier == .space,
+               items[index - 1].itemIdentifier.rawValue == "newFolder",
+               items[index + 1].itemIdentifier.rawValue == "tasks" { toolbar.removeItem(at: index) }
+        }
+    }
     private func toolbarImage(_ symbol: String, description: String) -> NSImage? {
         guard let source = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .regular, scale: .medium)) else { return nil }
-        // Use the system accent even for symbols without a palette variant. Keep the native toolbar controls.
-        let image = NSImage(size: source.size, flipped: false) { rect in
+        guard source.size.width > 0, source.size.height > 0 else { return nil }
+        // Equal canvases give the native buttons consistent sizes; fit and center each symbol inside.
+        let canvas = NSSize(width: 20, height: 20)
+        let image = NSImage(size: canvas, flipped: false) { rect in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
             context.saveGState(); context.beginTransparencyLayer(auxiliaryInfo: nil)
-            source.draw(in: rect)
+            let box = rect.insetBy(dx: 1, dy: 1)
+            let scale = min(box.width / source.size.width, box.height / source.size.height)
+            let size = NSSize(width: source.size.width * scale, height: source.size.height * scale)
+            source.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height))
             NSColor.controlAccentColor.setFill(); rect.fill(using: .sourceIn)
             context.endTransparencyLayer(); context.restoreGState()
             return true
         }
+        image.alignmentRect = NSRect(origin: .zero, size: canvas)
         image.isTemplate = false; image.accessibilityDescription = description
         return image
     }

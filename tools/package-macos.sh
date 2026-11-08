@@ -29,9 +29,9 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>育网云</string>
 <key>CFBundleExecutable</key><string>YuWangSync</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleVersion</key><string>3</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>YuWangReleaseVersion</key><string>0.1.0-preview.2</string>
+<key>YuWangReleaseVersion</key><string>0.1.0-preview.3</string>
 <key>CFBundleIconFile</key><string>app.icns</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>

@@ -34,7 +34,11 @@ __attribute__((visibility("default"))) char *yw_secret_get(const char *key, int 
         // Authorized legacy reads become items owned by the stable signed program.
         // Keep the old item intact; never rewrite or broaden its access controls.
         if (migrate) {
-            *status = (int)saveSecret(key, data, NO);
+            NSMutableDictionary *destination = query(key, NO);
+            destination[(__bridge id)kSecValueData] = data;
+            *status = (int)SecItemAdd((__bridge CFDictionaryRef)destination, NULL);
+            // A concurrent login may already have saved a newer value. Do not overwrite it.
+            if (*status == errSecDuplicateItem) *status = errSecSuccess;
             if (*status != errSecSuccess) return NULL;
         }
         char *text = calloc(data.length + 1, 1);

@@ -45,6 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         let toolbar = NSToolbar(identifier: "YuWangMainToolbar")
         toolbar.delegate = self; toolbar.displayMode = .iconOnly; toolbar.allowsUserCustomization = true; toolbar.autosavesConfiguration = true
         window.toolbar = toolbar; window.toolbarStyle = .unified
+        let titleSpacing = NSTitlebarAccessoryViewController()
+        titleSpacing.layoutAttribute = .left
+        titleSpacing.view = NSView(frame: NSRect(x: 0, y: 0, width: 8, height: 20))
+        window.addTitlebarAccessoryViewController(titleSpacing)
         if !window.setFrameUsingName("YuWangMainWindow") { window.center() }
         window.setFrameAutosaveName("YuWangMainWindow")
         mainWindow = window
@@ -158,7 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         return confirmed
     }
     func updateStatus() {
-        let text = "\(model.pendingCount) 项待办 · \(model.errorCount) 项需处理"
+        let text = "\(model.pendingCount) 项任务 · \(model.errorCount) 项需处理"
         statusLine?.title = text; statusItem?.button?.toolTip = "育网云 · " + text
         // The sidebar picker shows the account; keep the native title on one centered line.
         mainWindow?.title = model.currentFolder?.name ?? "育网云"
@@ -166,26 +170,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         mainWindow?.toolbar?.validateVisibleItems()
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [NSToolbarItem.Identifier("back"), NSToolbarItem.Identifier("forward"), NSToolbarItem.Identifier("refresh"), .flexibleSpace,
+        [.flexibleSpace, NSToolbarItem.Identifier("back"), NSToolbarItem.Identifier("forward"), NSToolbarItem.Identifier("refresh"),
          NSToolbarItem.Identifier("upload"), NSToolbarItem.Identifier("download"), NSToolbarItem.Identifier("newFolder"),
-         NSToolbarItem.Identifier("tasks"), NSToolbarItem.Identifier("more"), .space, NSToolbarItem.Identifier("search")]
+         NSToolbarItem.Identifier("more"), .space, NSToolbarItem.Identifier("search")]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         toolbarDefaultItemIdentifiers(toolbar).filter { $0 != .space } + [.space]
     }
     private func removeLegacyToolbarGap(_ toolbar: NSToolbar) {
         // Upgrade the old saved layout too, without resetting the user's other customizations.
+        for index in toolbar.items.indices.reversed() where toolbar.items[index].itemIdentifier.rawValue == "tasks" {
+            toolbar.removeItem(at: index)
+        }
         let items = toolbar.items
-        guard items.count >= 3 else { return }
-        for index in (1..<(items.count - 1)).reversed() {
-            if items[index].itemIdentifier == .space,
-               items[index - 1].itemIdentifier.rawValue == "newFolder",
-               items[index + 1].itemIdentifier.rawValue == "tasks" { toolbar.removeItem(at: index) }
+        if items.count >= 3 {
+            for index in (1..<(items.count - 1)).reversed() {
+                if items[index].itemIdentifier == .space,
+                   items[index - 1].itemIdentifier.rawValue == "newFolder",
+                   items[index + 1].itemIdentifier.rawValue == "more" { toolbar.removeItem(at: index) }
+            }
+        }
+        let oldPrefix = ["back", "forward", "refresh", NSToolbarItem.Identifier.flexibleSpace.rawValue]
+        if toolbar.items.prefix(4).map({ $0.itemIdentifier.rawValue }) == oldPrefix {
+            toolbar.removeItem(at: 3)
+            toolbar.insertItem(withItemIdentifier: .flexibleSpace, at: 0)
         }
     }
-    private func toolbarImage(_ symbol: String, description: String) -> NSImage? {
+    private func toolbarImage(_ symbol: String, description: String, primary: Bool) -> NSImage? {
         guard let symbolImage = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .regular, scale: .medium)) else { return nil }
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .medium, scale: .medium)) else { return nil }
         let source = croppedToolbarSymbol(symbolImage)
         guard source.size.width > 0, source.size.height > 0 else { return nil }
         // Equal canvases give the native buttons consistent sizes; fit and center each symbol inside.
@@ -194,10 +207,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
             context.saveGState(); context.beginTransparencyLayer(auxiliaryInfo: nil)
             let box = rect.insetBy(dx: 1, dy: 1)
-            let scale = min(box.width / source.size.width, box.height / source.size.height)
+            let scale = min(1, min(box.width / source.size.width, box.height / source.size.height))
             let size = NSSize(width: source.size.width * scale, height: source.size.height * scale)
             source.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height))
-            NSColor.controlAccentColor.setFill(); rect.fill(using: .sourceIn)
+            (primary ? NSColor.controlAccentColor : NSColor.controlTextColor).setFill(); rect.fill(using: .sourceIn)
             context.endTransparencyLayer(); context.restoreGState()
             return true
         }
@@ -229,23 +242,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     }
     private func setToolbarImage(_ item: NSToolbarItem, symbol: String, description: String) {
         toolbarSymbols[item.itemIdentifier.rawValue] = (symbol, description)
-        item.image = toolbarImage(symbol, description: description)
+        item.image = toolbarImage(symbol, description: description, primary: item.itemIdentifier.rawValue == "upload")
     }
     func refreshToolbarAppearance() {
         for item in mainWindow?.toolbar?.items ?? [] {
-            if let spec = toolbarSymbols[item.itemIdentifier.rawValue] { item.image = toolbarImage(spec.symbol, description: spec.description) }
+            if let spec = toolbarSymbols[item.itemIdentifier.rawValue] {
+                item.image = toolbarImage(spec.symbol, description: spec.description, primary: item.itemIdentifier.rawValue == "upload")
+            }
+        }
+        if let window = mainWindow {
+            window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                searchItem?.searchField.layer?.borderColor = NSColor.controlTextColor.withAlphaComponent(0.22).cgColor
+            }
         }
         mainWindow?.toolbar?.validateVisibleItems()
     }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         if identifier.rawValue == "search" {
             let item = NSSearchToolbarItem(itemIdentifier: identifier); item.searchField.placeholderString = "筛选当前目录"
-            item.preferredWidthForSearchField = 220
+            item.preferredWidthForSearchField = 180
+            item.searchField.wantsLayer = true
+            item.searchField.layer?.cornerRadius = 6
+            item.searchField.layer?.borderWidth = 1
+            item.searchField.layer?.borderColor = NSColor.controlTextColor.withAlphaComponent(0.22).cgColor
             // Bound the native field so it does not consume the flexible space
             // separating navigation from file actions.
             NSLayoutConstraint.activate([
-                item.searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
-                item.searchField.widthAnchor.constraint(lessThanOrEqualToConstant: 220)
+                item.searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 160),
+                item.searchField.widthAnchor.constraint(lessThanOrEqualToConstant: 180)
             ])
             item.searchField.delegate = self; item.searchField.sendsSearchStringImmediately = true; item.label = "搜索"; searchItem = item; return item
         }
@@ -266,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         let specs: [String: (String, String, Selector)] = [
             "back": ("后退", "chevron.left", #selector(goBack)), "forward": ("前进", "chevron.right", #selector(goForward)),
             "refresh": ("刷新", "arrow.clockwise", #selector(refresh)), "download": ("离线下载", "square.and.arrow.down", #selector(download)),
-            "newFolder": ("新建文件夹", "folder.badge.plus", #selector(newFolder)), "tasks": ("传输与待办", "list.bullet.rectangle", #selector(toggleTasks))]
+            "newFolder": ("新建文件夹", "folder.badge.plus", #selector(newFolder))]
         guard let spec = specs[identifier.rawValue] else { return nil }
         let item = NSToolbarItem(itemIdentifier: identifier); item.label = spec.0; item.toolTip = spec.0
         item.isBordered = true
@@ -435,7 +459,7 @@ enum NativeSelfTest {
             !$0.isEmpty && !$0.intersects(content) && $0.minY >= window.contentLayoutRect.maxY
         }
         let identifiers = window.toolbar?.items.map { $0.itemIdentifier.rawValue } ?? []
-        let required: Set<String> = ["back", "forward", "refresh", "upload", "download", "newFolder", "more", "tasks", "search"]
+        let required: Set<String> = ["back", "forward", "refresh", "upload", "download", "newFolder", "more", "search"]
         checks["native-file-toolbar-" + suffix] = window.toolbar?.identifier == "YuWangMainToolbar"
             && window.toolbar?.isVisible == true && required.isSubset(of: Set(identifiers))
         return ["windowFrame": NSStringFromRect(window.frame), "content": NSStringFromRect(content),

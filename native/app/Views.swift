@@ -118,7 +118,7 @@ struct RootView: View {
                     Button { model.perform { _ = try await model.send("cancelTransfer") } } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).help("停止当前下载")
                 } else if !model.message.isEmpty { Text(model.message).lineLimit(1).foregroundStyle(.secondary) }
                 Spacer()
-                Button { model.showTasks.toggle() } label: { Label("\(model.pendingCount) 项待办", systemImage: model.errorCount > 0 ? "exclamationmark.circle" : "list.bullet.rectangle") }.buttonStyle(.plain)
+                Button { model.showTasks.toggle() } label: { Label("\(model.pendingCount) 项任务", systemImage: model.errorCount > 0 ? "exclamationmark.circle" : "list.bullet.rectangle") }.buttonStyle(.plain)
             }.font(.caption).padding(.horizontal, 16).padding(.vertical, 9)
         }
     }
@@ -183,7 +183,7 @@ struct TaskPane: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("传输与待办").font(.headline); Spacer()
+                Text("传输与任务").font(.headline); Spacer()
                 Button { model.showTasks = false } label: { Image(systemName: "xmark") }.buttonStyle(.plain).foregroundStyle(.secondary)
             }.padding(.horizontal, 14).padding(.vertical, 9)
             Table(model.state?.operations ?? [], selection: $model.taskSelection) {

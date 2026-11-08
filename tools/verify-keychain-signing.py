@@ -48,7 +48,7 @@ else:
         certificate = root / 'docs/signing/preview-signing.pem'
         run('sudo', 'security', 'remove-trusted-cert', '-d', str(certificate))
         run('sudo', 'security', 'delete-certificate', '-Z', os.environ['YUWANG_SIGNING_IDENTITY'], '/Library/Keychains/System.keychain')
-        trust = subprocess.run(['security', 'verify-cert', '-c', str(certificate), '-p', 'codesigning'], capture_output=True, timeout=30)
+        trust = subprocess.run(['security', 'verify-cert', '-c', str(certificate), '-p', 'codeSign'], capture_output=True, timeout=30)
         checks['no-system-certificate-trust'] = trust.returncode != 0
         error = ''
         try:

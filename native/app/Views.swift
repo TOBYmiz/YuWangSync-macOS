@@ -33,9 +33,13 @@ struct RootView: View {
                     .buttonStyle(.borderless).help("添加账号")
             }.padding(12)
             Divider()
-            NativeDirectoryTree(model: model).frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            FavoritesPane(model: model)
+            VSplitView {
+                NativeDirectoryTree(model: model).frame(minHeight: 120, maxHeight: .infinity)
+                FavoritesPane(model: model)
+                    .frame(minHeight: model.favoritesExpanded ? 80 : 36,
+                           idealHeight: model.favoritesExpanded ? 180 : 36,
+                           maxHeight: model.favoritesExpanded ? .infinity : 36)
+            }
             Divider()
             VStack(alignment: .leading, spacing: 5) {
                 Label(model.state?.connectionStatus ?? "正在启动…", systemImage: model.state?.offline == true ? "wifi.slash" : "checkmark.icloud")
@@ -166,10 +170,11 @@ struct FavoritesPane: View {
                                     .contextMenu { Button("移除收藏") { model.removeFavorite(favorite) } }
                             }
                         }.padding(.horizontal, 6)
-                    }.frame(height: min(CGFloat(model.visibleFavorites.count) * 32, 180)).padding(.bottom, 8)
+                    }.frame(maxHeight: .infinity).padding(.bottom, 8)
                 }
             }
-        }.accessibilityIdentifier("sidebar-favorites")
+        }.frame(maxWidth: .infinity, maxHeight: model.favoritesExpanded ? .infinity : nil, alignment: .top)
+            .accessibilityIdentifier("sidebar-favorites")
     }
 }
 

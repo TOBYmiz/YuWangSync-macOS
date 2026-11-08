@@ -150,8 +150,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     func updateStatus() {
         let text = "\(model.pendingCount) 项待办 · \(model.errorCount) 项需处理"
         statusLine?.title = text; statusItem?.button?.toolTip = "育网云 · " + text
+        // The sidebar picker shows the account; keep the native title on one centered line.
         mainWindow?.title = model.currentFolder?.name ?? "育网云"
-        mainWindow?.subtitle = model.state?.activeAccount?.displayName ?? ""
         if searchItem?.searchField.stringValue != model.filter { searchItem?.searchField.stringValue = model.filter }
         mainWindow?.toolbar?.validateVisibleItems()
     }

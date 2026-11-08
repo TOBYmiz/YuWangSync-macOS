@@ -60,8 +60,16 @@ elif sys.argv[1:] == ['verify']:
         probe(first, 'write')
         probe(first, 'read'); checks['restart-read-without-ui'] = True
         probe(first, 'read'); checks['second-restart-read-without-ui'] = True
-        probe(second, 'read'); checks['upgrade-read-without-ui'] = True
-        probe(second, 'read'); checks['upgraded-restart-read-without-ui'] = True
+        try:
+            probe(second, 'read')
+            checks['upgrade-requires-authorization'] = False
+        except subprocess.CalledProcessError as failure:
+            checks['upgrade-requires-authorization'] = failure.returncode == 1 and 'authorization was not retained' in failure.stderr
+        # A fresh save models the authorized new version. Only synthetic CI data is recreated.
+        probe(first, 'delete')
+        probe(second, 'write')
+        probe(second, 'read'); checks['new-version-restart-read-without-ui'] = True
+        probe(second, 'read'); checks['new-version-second-restart-read-without-ui'] = True
         probe(second, 'delete'); checks['delete-without-ui'] = True
     except (subprocess.SubprocessError, OSError, StopIteration, ValueError) as failure:
         error = str(failure)
@@ -70,8 +78,8 @@ elif sys.argv[1:] == ['verify']:
             probe(first, 'delete')
         except (subprocess.SubprocessError, OSError):
             pass
-    passed = len(checks) == 9 and all(checks.values()) and not error
-    report.write_text(json.dumps({'passed': passed, 'checks': checks, 'error': error}, indent=2))
+    passed = len(checks) == 10 and all(checks.values()) and not error
+    report.write_text(json.dumps({'passed': passed, 'upgradeAuthorizationRequired': True, 'checks': checks, 'error': error}, indent=2))
     print(report.read_text())
     if not passed:
         raise SystemExit(1)

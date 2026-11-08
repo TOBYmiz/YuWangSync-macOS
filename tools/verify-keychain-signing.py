@@ -57,6 +57,11 @@ elif sys.argv[1:] == ['verify']:
         checks['no-system-certificate-trust'] = trust.returncode != 0
         if not all(checks.values()):
             raise ValueError('The fixture does not model an untrusted-certificate update.')
+        probe(first, 'legacy-write')
+        probe(first, 'read'); checks['legacy-service-migration'] = True
+        probe(first, 'legacy-delete')
+        probe(first, 'read'); checks['migrated-item-independent-of-legacy'] = True
+        probe(first, 'delete')
         probe(first, 'write')
         probe(first, 'read'); checks['restart-read-without-ui'] = True
         probe(first, 'read'); checks['second-restart-read-without-ui'] = True
@@ -78,7 +83,7 @@ elif sys.argv[1:] == ['verify']:
             probe(first, 'delete')
         except (subprocess.SubprocessError, OSError):
             pass
-    passed = len(checks) == 10 and all(checks.values()) and not error
+    passed = len(checks) == 12 and all(checks.values()) and not error
     report.write_text(json.dumps({'passed': passed, 'upgradeAuthorizationRequired': True, 'checks': checks, 'error': error}, indent=2))
     print(report.read_text())
     if not passed:

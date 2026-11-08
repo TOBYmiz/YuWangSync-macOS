@@ -119,6 +119,8 @@ internal static class Native
     internal static extern int SecretDelete([MarshalAs(UnmanagedType.LPUTF8Str)] string key);
     [DllImport(Library, EntryPoint = "yw_free", CallingConvention = CallingConvention.Cdecl)] internal static extern void Free(IntPtr pointer);
     [DllImport(Library, EntryPoint = "yw_keychain_disable_ui", CallingConvention = CallingConvention.Cdecl)] internal static extern int DisableKeychainUI();
+    [DllImport(Library, EntryPoint = "yw_secret_legacy_probe", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int LegacySecretProbe([MarshalAs(UnmanagedType.LPUTF8Str)] string key, [MarshalAs(UnmanagedType.LPUTF8Str)] string? value);
     [DllImport(Library, EntryPoint = "yw_snapshot_copy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CopySnapshot([MarshalAs(UnmanagedType.LPUTF8Str)] string source, [MarshalAs(UnmanagedType.LPUTF8Str)] string destination);
 }

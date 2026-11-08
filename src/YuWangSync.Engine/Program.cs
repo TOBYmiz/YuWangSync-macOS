@@ -318,13 +318,17 @@ internal static class SelfTests
     {
         // Accept only synthetic CI keys. Never dump values or touch real account credentials.
         if (!OperatingSystem.IsMacOS() || key is null || !key.StartsWith("signing-selftest:", StringComparison.Ordinal)
-            || action is not ("write" or "read" or "delete")) return 2;
+            || action is not ("write" or "read" or "delete" or "legacy-write" or "legacy-delete")) return 2;
         try
         {
             if (Native.DisableKeychainUI() != 0) return 3;
             var store = new MacSecretStore();
             const string value = "YuWangSync synthetic signing probe";
-            if (action == "write") await store.SetAsync(key, value);
+            if (action is "legacy-write" or "legacy-delete")
+            {
+                if (Native.LegacySecretProbe(key, action == "legacy-write" ? value : null) != 0) return 5;
+            }
+            else if (action == "write") await store.SetAsync(key, value);
             else if (action == "read" && await store.GetAsync(key) != value) return 4;
             else if (action == "delete") await store.DeleteAsync(key);
             Console.WriteLine("Keychain signing probe passed: " + action); return 0;

@@ -72,14 +72,6 @@ struct TransferState: Decodable {
     let total: Int64
     let percent: Double
 }
-struct SidebarNode: Identifiable {
-    let id: String
-    let title: String
-    let symbol: String
-    let children: [SidebarNode]?
-    var unloaded = false
-    var isDiskRoot = false
-}
 struct FavoriteFolder: Codable, Identifiable, Equatable {
     let accountId: String
     let entryId: String

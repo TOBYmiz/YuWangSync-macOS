@@ -7,9 +7,12 @@ import Network
 final class AppModel: ObservableObject {
     static let shared = AppModel()
     let bridge = EngineBridge()
-    @Published var state: ClientState?
+    @Published var state: ClientState? { didSet { browserIndex = BrowserIndex(state) } }
+    private(set) var browserIndex = BrowserIndex()
+    @Published private(set) var sidebarRevealRevision = 0
+    private(set) var sidebarRevealID: String?
     @Published var transfer: TransferState?
-    @Published var selection = Set<String>() { didSet { AppDelegate.shared?.updateStatus() } }
+    @Published var selection = Set<String>() { didSet { if oldValue != selection { scheduleStatusUpdate() } } }
     @Published var taskSelection: String?
     @Published var sidebarSelection: String?
     @Published var filter = ""
@@ -31,10 +34,14 @@ final class AppModel: ObservableObject {
     private var networkCost = "unknown"
     private var reportedNetworkCost: String?
     private var back: [String] = [], forward: [String] = []
+    private var statusUpdateScheduled = false
     var isSelfTest: Bool { CommandLine.arguments.contains("--ui-selftest") }
     var isDemo: Bool { isSelfTest || CommandLine.arguments.contains("--demo") }
-    var currentFolder: CloudEntry? { state?.entries.first { $0.id == state?.folderId } }
-    var selectedEntries: [CloudEntry] { (state?.entries ?? []).filter { selection.contains($0.id) } }
+    var currentFolder: CloudEntry? { guard let id = state?.folderId else { return nil }; return browserIndex.entries[id] }
+    var selectedEntries: [CloudEntry] { selection.compactMap { browserIndex.entries[$0] } }
+    var fileRows: [CloudEntry] {
+        (browserIndex.filesByParent[state?.folderId ?? ""] ?? []).filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }
+    }
     var selectedOperation: CloudOperation? { state?.operations.first { $0.id == taskSelection } }
     var pendingCount: Int { state?.operations.filter { !$0.isTerminal }.count ?? 0 }
     var errorCount: Int { state?.operations.filter { ["blocked", "failed", "uncertain"].contains($0.state) }.count ?? 0 }
@@ -50,7 +57,8 @@ final class AppModel: ObservableObject {
     var visibleFavorites: [FavoriteFolder] { favoriteFolders.filter { $0.accountId == state?.activeAccount?.id } }
     func favoriteEntry(_ favorite: FavoriteFolder) -> CloudEntry? {
         guard favorite.accountId == state?.activeAccount?.id else { return nil }
-        return state?.entries.first { $0.id == favorite.entryId && $0.accountId == favorite.accountId && $0.isDirectory }
+        guard let entry = browserIndex.entries[favorite.entryId], entry.accountId == favorite.accountId, entry.isDirectory else { return nil }
+        return entry
     }
     func isFavorite(_ entry: CloudEntry) -> Bool {
         favoriteFolders.contains { $0.accountId == entry.accountId && $0.entryId == entry.id }
@@ -76,7 +84,7 @@ final class AppModel: ObservableObject {
         var names: [String] = [], seen = Set<String>(), entry = favoriteEntry(favorite)
         while let current = entry, seen.insert(current.id).inserted {
             names.append(current.name)
-            entry = state?.entries.first { $0.id == current.parentId && $0.accountId == favorite.accountId }
+            entry = current.parentId.flatMap { browserIndex.entries[$0] }
         }
         return names.reversed().joined(separator: " / ")
     }
@@ -87,13 +95,15 @@ final class AppModel: ObservableObject {
         bridge.onState = { [weak self] state in
             guard let self else { return }
             let previous = self.state?.folderId
+            if self.state?.activeAccount?.id != state.activeAccount?.id { self.sidebarRevealID = nil }
             self.state = state
             self.reportNetworkCost()
             if let operation = self.transfer?.operationId, !state.operations.contains(where: { $0.id == operation && $0.state == "running" }) { self.transfer = nil }
             NativeDiagnostics.write("state received entries=\(state.entries.count) operations=\(state.operations.count)")
             if previous != state.folderId { self.sidebarSelection = state.folderId; self.selection.removeAll() }
-            self.selection.formIntersection(Set(state.entries.map(\.id)))
-            AppDelegate.shared?.updateStatus()
+            let valid = self.selection.intersection(Set(self.fileRows.map(\.id)))
+            if valid != self.selection { self.selection = valid }
+            self.scheduleStatusUpdate()
         }
         bridge.onProgress = { [weak self] progress in self?.transfer = progress }
         bridge.onFailure = { [weak self] error in self?.errorMessage = error }
@@ -114,9 +124,18 @@ final class AppModel: ObservableObject {
     func perform(_ action: @escaping @MainActor () async throws -> Void) {
         Task { do { try await action() } catch { errorMessage = error.localizedDescription } }
     }
+    private func scheduleStatusUpdate() {
+        guard !statusUpdateScheduled else { return }; statusUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.statusUpdateScheduled = false
+            AppDelegate.shared?.updateStatus()
+        }
+    }
     @discardableResult
     func send(_ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] { try await bridge.request(method, params) }
     func navigate(_ id: String, history: Bool = true) async throws {
+        sidebarRevealID = id; sidebarRevealRevision += 1
+        sidebarSelection = id
         if state?.folderId == id { return }
         if history, let current = state?.folderId { back.append(current); forward.removeAll() }
         filter = ""; selection.removeAll(); _ = try await send("browse", ["folderId": id])
@@ -251,28 +270,8 @@ final class AppModel: ObservableObject {
         }
     }
     var breadcrumbs: [CloudEntry] {
-        guard let state else { return [] }; var output: [CloudEntry] = [], seen = Set<String>(); var item = currentFolder
-        while let current = item, seen.insert(current.id).inserted { output.append(current); item = state.entries.first { $0.id == current.parentId } }
+        guard state != nil else { return [] }; var output: [CloudEntry] = [], seen = Set<String>(); var item = currentFolder
+        while let current = item, seen.insert(current.id).inserted { output.append(current); item = current.parentId.flatMap { browserIndex.entries[$0] } }
         return output.reversed()
-    }
-    var sidebarNodes: [SidebarNode] {
-        guard let state else { return [] }
-        func folder(_ entry: CloudEntry, _ seen: Set<String>) -> SidebarNode {
-            var next = seen; let fresh = next.insert(entry.id).inserted
-            let children = fresh ? state.entries.filter { $0.parentId == entry.id && $0.isDirectory }.map { folder($0, next) } : []
-            return SidebarNode(id: entry.id, title: entry.name, symbol: entry.isDiskRoot ? "externaldrive" : "folder", children: children.isEmpty ? nil : children,
-                               unloaded: entry.lastListed == nil && (entry.isDiskRoot || entry.remoteId != 0), isDiskRoot: entry.isDiskRoot)
-        }
-        func container(_ node: DiskNode, _ seen: Set<UInt64>) -> SidebarNode {
-            var next = seen; let fresh = next.insert(node.id).inserted
-            let children: [SidebarNode] = fresh ? state.tree.filter { $0.parentId == node.id }.compactMap { child in
-                if child.nodeType == "container" { return container(child, next) }
-                return state.entries.first { $0.isDiskRoot && $0.diskId == child.id }.map { folder($0, []) }
-            } : []
-            return SidebarNode(id: "container:\(node.id)", title: node.name, symbol: "building.2", children: children.isEmpty ? nil : children)
-        }
-        return state.tree.filter { $0.parentId == 0 }.compactMap { node in
-            node.nodeType == "container" ? container(node, []) : state.entries.first { $0.isDiskRoot && $0.diskId == node.id }.map { folder($0, []) }
-        }
     }
 }

@@ -4,22 +4,13 @@ import UniformTypeIdentifiers
 
 struct RootView: View {
     @ObservedObject var model: AppModel
-    @State private var sortOrder = [KeyPathComparator(\CloudEntry.name)]
     @State private var dropTarget = false
-    private var rows: [CloudEntry] {
-        let entries = (model.state?.entries ?? []).filter { $0.parentId == model.state?.folderId && (model.filter.isEmpty || $0.name.localizedCaseInsensitiveContains(model.filter)) }.sorted(using: sortOrder)
-        return entries.filter(\.isDirectory) + entries.filter { !$0.isDirectory }
-    }
+    private var rows: [CloudEntry] { model.fileRows }
     var body: some View {
         // NavigationSplitView installs its own window toolbar when hosted by AppKit.
         // Keep the split content below the native title bar owned by AppDelegate.
         HSplitView { sidebar; content.frame(maxWidth: .infinity, maxHeight: .infinity) }
             .frame(minWidth: 900, minHeight: 620)
-            .onChange(of: model.sidebarSelection) { _, value in
-                if let value, !value.hasPrefix("container:"), value != model.state?.folderId {
-                    model.perform { try await model.navigate(value) }
-                }
-            }
             .sheet(isPresented: $model.showLogin) { LoginSheet(model: model, existing: model.loginAccount) }
             .sheet(isPresented: $model.showCollisions) { CollisionSheet(model: model) }
             .sheet(isPresented: $model.showMove) { MoveSheet(model: model) }
@@ -42,17 +33,7 @@ struct RootView: View {
                     .buttonStyle(.borderless).help("添加账号")
             }.padding(12)
             Divider()
-            List(selection: $model.sidebarSelection) {
-                ForEach(model.sidebarNodes) { node in
-                    if node.id.hasPrefix("container:") {
-                        Section(node.title) {
-                            ForEach(node.children ?? []) { child in SidebarBranch(model: model, node: child) }
-                        }
-                    } else {
-                        SidebarBranch(model: model, node: node)
-                    }
-                }
-            }.listStyle(.sidebar)
+            NativeDirectoryTree(model: model).frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             FavoritesPane(model: model)
             Divider()
@@ -85,39 +66,14 @@ struct RootView: View {
         }
     }
     private var fileList: some View {
-        Table(rows, selection: $model.selection, sortOrder: $sortOrder) {
-            TableColumn("名称", value: \.name) { entry in
-                HStack(spacing: 6) {
-                    Image(nsImage: NSWorkspace.shared.icon(for: entry.isDirectory ? UTType.folder : (UTType(filenameExtension: (entry.name as NSString).pathExtension) ?? UTType.data)))
-                        .resizable().frame(width: 16, height: 16)
-                    Text(entry.name)
-                }.onTapGesture(count: 2) { model.open(entry) }
-            }.width(min: 180, ideal: 300)
-            TableColumn("大小") { (entry: CloudEntry) in Text(entry.sizeLabel).foregroundStyle(.secondary) }.width(min: 65, ideal: 90, max: 110)
-            TableColumn("上传时间") { (entry: CloudEntry) in Text(entry.dateLabel).foregroundStyle(.secondary) }.width(min: 130, ideal: 145, max: 180)
-            TableColumn("状态") { (entry: CloudEntry) in Text(entry.status).foregroundStyle(.secondary) }.width(min: 110, ideal: 180)
-        }
+        NativeFileTable(model: model)
         .overlay {
             if rows.isEmpty {
                 ContentUnavailableView(model.filter.isEmpty ? "文件夹为空" : "没有匹配的文件", systemImage: "folder", description: Text(model.filter.isEmpty ? "可以上传文件或新建文件夹。" : "试试其他名称。"))
                     .allowsHitTesting(false)
             }
         }
-        .contextMenu { rowMenu }
         .onDrop(of: [UTType.fileURL], isTargeted: $dropTarget, perform: acceptDrop)
-    }
-    @ViewBuilder private var rowMenu: some View {
-        Button("打开") { if let entry = model.selectedEntries.first { model.open(entry) } }
-        Button("离线下载") { model.download() }
-        Button("另存为…") { model.exportSelected() }
-        Button("在访达中显示") { model.revealSelected() }.disabled(model.selectedEntries.first?.localPath == nil)
-        if model.selectedEntries.count == 1, let entry = model.selectedEntries.first, entry.isDirectory {
-            Button(model.isFavorite(entry) ? "取消收藏" : "添加到收藏") { model.toggleFavorite(entry) }
-        }
-        Divider()
-        Button("重命名…") { model.renameSelected() }
-        Button("移动到…") { model.showMove = true }
-        Button("移到云端回收站…", role: .destructive) { model.deleteSelected() }
     }
     private func acceptDrop(_ providers: [NSItemProvider]) -> Bool {
         guard model.state?.folderId != nil else { return false }
@@ -160,48 +116,6 @@ struct RootView: View {
                 Spacer()
                 Button { model.showTasks.toggle() } label: { Label("\(model.pendingCount) 项待办", systemImage: model.errorCount > 0 ? "exclamationmark.circle" : "list.bullet.rectangle") }.buttonStyle(.plain)
             }.font(.caption).padding(.horizontal, 16).padding(.vertical, 9)
-        }
-    }
-}
-
-struct SidebarBranch: View {
-    @ObservedObject var model: AppModel
-    let node: SidebarNode
-    @State private var expanded = false // Drives and folders start collapsed, including preloaded branches.
-    @State private var loading = false
-    var body: some View {
-        if node.isDiskRoot || node.unloaded || !(node.children ?? []).isEmpty {
-            DisclosureGroup(isExpanded: $expanded) {
-                ForEach(node.children ?? []) { child in SidebarBranch(model: model, node: child) }
-                if node.unloaded {
-                    if loading {
-                        HStack { ProgressView().controlSize(.small); Text("正在加载…") }.foregroundStyle(.secondary)
-                    } else {
-                        Button("加载子目录") { load() }.buttonStyle(.plain).foregroundStyle(.secondary)
-                    }
-                } else if node.isDiskRoot && (node.children ?? []).isEmpty {
-                    Text("没有子文件夹").font(.caption).foregroundStyle(.secondary)
-                }
-            } label: { label }
-            .tag(node.id)
-            .onChange(of: expanded) { _, value in if value && node.unloaded { load() } }
-        } else {
-            label.tag(node.id)
-        }
-    }
-    private var label: some View {
-        Label(node.title, systemImage: node.symbol).contextMenu {
-            if let entry = model.state?.entries.first(where: { $0.id == node.id && $0.isDirectory }) {
-                Button(model.isFavorite(entry) ? "取消收藏" : "添加到收藏") { model.toggleFavorite(entry) }
-            }
-        }
-    }
-    private func load() {
-        guard !loading else { return }; loading = true
-        Task { @MainActor in
-            defer { loading = false }
-            do { _ = try await model.send("loadFolder", ["folderId": node.id]) }
-            catch { model.errorMessage = error.localizedDescription }
         }
     }
 }

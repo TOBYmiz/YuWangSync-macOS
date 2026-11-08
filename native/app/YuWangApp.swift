@@ -152,7 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         statusLine?.title = text; statusItem?.button?.toolTip = "育网云 · " + text
         mainWindow?.title = model.currentFolder?.name ?? "育网云"
         mainWindow?.subtitle = model.state?.activeAccount?.displayName ?? ""
-        searchItem?.searchField.stringValue = model.filter
+        if searchItem?.searchField.stringValue != model.filter { searchItem?.searchField.stringValue = model.filter }
         mainWindow?.toolbar?.validateVisibleItems()
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -252,12 +252,11 @@ enum NativeSelfTest {
             NativeDiagnostics.write("state ready; windows=\(NSApp.windows.map { "\($0.title):\($0.isVisible)" })")
             checks["native-window"] = AppDelegate.shared?.mainWindow?.isVisible == true
             checks["native-table-data"] = state.entries.contains { !$0.isDirectory }
-            checks["native-sidebar-data"] = !model.sidebarNodes.isEmpty
-            func diskNodes(_ nodes: [SidebarNode]) -> [SidebarNode] {
-                nodes.flatMap { ($0.isDiskRoot ? [$0] : []) + diskNodes($0.children ?? []) }
-            }
-            let disks = diskNodes(model.sidebarNodes)
+            checks["native-sidebar-data"] = !model.browserIndex.directories.roots.isEmpty
+            let disks = model.browserIndex.directories.rows.values.filter(\.isDiskRoot)
             checks["sidebar-drives-collapsible"] = !disks.isEmpty && disks.count == state.entries.filter(\.isDiskRoot).count
+            let interaction = try await NativeBrowserSelfTest.run(model: model, output: path)
+            checks.merge(interaction) { _, value in value }
             // Test saved folder references with an isolated domain, never real preferences.
             guard let favoriteTarget = state.entries.first(where: { $0.isDirectory && !$0.isDiskRoot && $0.id != folder }) else {
                 throw BridgeError(message: "收藏自检缺少演示目录。")
@@ -293,6 +292,8 @@ enum NativeSelfTest {
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             checks["favorites-engine-navigation"] = model.state?.folderId == favoriteTarget.id && model.sidebarSelection == favoriteTarget.id
+            try await Task.sleep(nanoseconds: 150_000_000)
+            checks["favorites-reveal-ancestors"] = NativeBrowserSelfTest.isRevealed(favoriteTarget.id, model: model)
             try await model.navigate(folder)
             let result = try await model.send("createFolder", ["parentId": folder, "name": "原生界面自检目录"])
             guard let entryID = result["entryId"] as? String else { throw BridgeError(message: "未返回目录实体。") }
@@ -335,7 +336,7 @@ enum NativeSelfTest {
         } catch let failure { error = failure.localizedDescription + "\n" + model.bridge.stderr }
         NativeDiagnostics.write("self-test requesting engine shutdown")
         checks["engine-shutdown"] = await AppDelegate.shared?.prepareForTermination() == true
-        let passed = checks.count == 24 && checks.values.allSatisfy { $0 } && error.isEmpty
+        let passed = checks.count == 38 && checks.values.allSatisfy { $0 } && error.isEmpty
         do {
             let output = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: ["passed": passed, "nativeControls": true, "checks": checks, "windowChrome": chrome, "error": error], options: [.prettyPrinted, .sortedKeys])
@@ -364,7 +365,7 @@ enum NativeSelfTest {
                 "contentLayout": NSStringFromRect(window.contentLayoutRect), "trafficLights": frames.map { NSStringFromRect($0) },
                 "toolbarItems": identifiers]
     }
-    private static func capture(_ window: NSWindow, to output: URL) throws {
+    static func capture(_ window: NSWindow, to output: URL) throws {
         guard let view = window.contentView?.superview,
               let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             throw BridgeError(message: "无法创建完整窗口截图。")

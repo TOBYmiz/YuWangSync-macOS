@@ -60,7 +60,6 @@ jobs:
         run: bash tools/package-macos.sh
       - name: Prepare signed Keychain upgrade fixture
         run: python3 tools/verify-keychain-signing.py prepare
-      - run: dotnet test YuWangSync.slnx -c Release --no-restore --logger "trx;LogFileName=macos.trx" --results-directory artifacts/tests
       - name: Keychain and coordinated-file smoke test
         timeout-minutes: 3
         run: artifacts/package/YuWangSync.app/Contents/MacOS/Engine/YuWangSync.Engine --platform-selftest --output artifacts/platform-macos.json
@@ -93,6 +92,7 @@ jobs:
             sleep 1
           done
           if pgrep -x YuWangSync >/dev/null; then echo 'Native app did not exit after its self-test.' >&2; exit 1; fi
+      - run: dotnet test YuWangSync.slnx -c Release --no-restore --logger "trx;LogFileName=macos.trx" --results-directory artifacts/tests
       - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:

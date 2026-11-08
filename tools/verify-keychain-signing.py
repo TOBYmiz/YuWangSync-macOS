@@ -44,6 +44,12 @@ else:
         for binary in (first, second):
             hashes.append(next(line for line in signature(binary, '--verbose=4').splitlines() if line.startswith('CDHash=')))
         checks['different-code-hashes'] = hashes[0] != hashes[1]
+        # An end user does not trust our private preview CA. Match that environment.
+        certificate = root / 'docs/signing/preview-signing.pem'
+        run('sudo', 'security', 'remove-trusted-cert', '-d', str(certificate))
+        run('sudo', 'security', 'delete-certificate', '-Z', os.environ['YUWANG_SIGNING_IDENTITY'], '/Library/Keychains/System.keychain')
+        trust = subprocess.run(['security', 'verify-cert', '-c', str(certificate), '-p', 'codesigning'], capture_output=True, timeout=30)
+        checks['no-system-certificate-trust'] = trust.returncode != 0
         error = ''
         try:
             probe(first, 'write')
@@ -59,7 +65,7 @@ else:
                 probe(first, 'delete')
             except (subprocess.SubprocessError, OSError):
                 pass
-        passed = len(checks) == 7 and all(checks.values()) and not error
+        passed = len(checks) == 8 and all(checks.values()) and not error
         report.write_text(json.dumps({'passed': passed, 'skipped': False, 'checks': checks, 'error': error}, indent=2))
         print(report.read_text())
         if not passed:

@@ -27,7 +27,8 @@ enum NativeBrowserSelfTest {
             windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1),
               let up = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: modifiers, timestamp: time + 0.01,
             windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 0) else { throw BridgeError(message: "无法创建原生鼠标事件。") }
-        NSApp.postEvent(up, atStart: true); view.mouseDown(with: down)
+        // Route through the application/window so disclosure buttons and cell hit tests participate.
+        NSApp.postEvent(up, atStart: true); NSApp.sendEvent(down)
     }
     static func run(model: AppModel, output: String) async throws -> [String: Bool] {
         NativeDiagnostics.write("browser interaction: entered")
@@ -85,7 +86,7 @@ enum NativeBrowserSelfTest {
         guard let outline = find(NSOutlineView.self, in: window.contentView, identifier: "cloud-outline"),
               let table = find(NSTableView.self, in: window.contentView, identifier: "cloud-files") else { throw BridgeError(message: "原生文件浏览控件未就绪。") }
         checks["two-drive-groups-collapsed"] = outline.numberOfRows == 2
-        let drive = outline.item(atRow: 0)!
+        guard let drive = outline.item(atRow: 0) else { throw BridgeError(message: "驱动器自检行缺失。") }
         let outlineStart = ProcessInfo.processInfo.systemUptime
         for _ in 0..<40 { outline.expandItem(drive); outline.collapseItem(drive) }
         NativeDiagnostics.write("browser interaction: rapid drive collapse finished")
@@ -93,10 +94,11 @@ enum NativeBrowserSelfTest {
         // Disclosure click must expand the group without starting folder navigation.
         let disclosure = outline.frameOfOutlineCell(atRow: 0)
         try click(outline, at: NSPoint(x: disclosure.midX, y: disclosure.midY))
-        NativeDiagnostics.write("browser interaction: disclosure mouse click returned")
+        NativeDiagnostics.write("browser interaction: disclosure click frame=\(disclosure) rows=\(outline.numberOfRows) expanded=\(outline.isItemExpanded(drive))")
         checks["drive-disclosure-click"] = outline.isItemExpanded(drive) && outline.numberOfRows == 3
+        if !outline.isItemExpanded(drive) { outline.expandItem(drive) }
         if let nested = outline.item(atRow: 1) { outline.expandItem(nested) }
-        let disk = outline.item(atRow: 2)!
+        guard outline.numberOfRows >= 4, let disk = outline.item(atRow: 2) else { throw BridgeError(message: "展开后共享盘自检行缺失。") }
         let collapseStart = ProcessInfo.processInfo.systemUptime
         for _ in 0..<10 { outline.expandItem(disk); outline.collapseItem(disk) }
         NativeDiagnostics.write("browser interaction: large drive collapse finished")

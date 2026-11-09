@@ -133,4 +133,60 @@ public sealed class VerificationTests
         }
         finally { w.PreemptVerification(); await verification; }
     }
+    [Fact]
+    public async Task Cancelling_pending_verification_finishes_task_and_does_not_block_delete()
+    {
+        await using var f = await Fixture.CreateAsync(); f.Cloud.DeferVerification = true;
+        var w = f.Workspace; var id = (await w.ImportAsync(f.Disk, [f.File("cancel-check.txt", "content")])).Single();
+        await w.RunOnceAsync();
+        Assert.Equal(OperationState.AwaitingVerification, w.Store.GetOperation(id)!.State);
+        var snapshot = w.Store.GetOperation(id)!.SnapshotPath!;
+        w.Cancel(id);
+        Assert.Equal(OperationState.Completed, w.Store.GetOperation(id)!.State);
+        Assert.Contains("取消下载校验", w.Store.GetOperation(id)!.Error);
+        Assert.False(File.Exists(snapshot));
+        var entry = w.Store.GetOperation(id)!.EntryId; var remote = w.Store.GetEntry(entry)!.RemoteId;
+        await w.DeleteAsync(entry); await f.DrainAsync();
+        Assert.All(w.Store.Operations(), o => Assert.Equal(OperationState.Completed, o.State));
+        Assert.False(f.Cloud.Items.ContainsKey(remote));
+        Assert.Equal(0, f.Cloud.HashCalls);
+    }
+
+    [Fact]
+    public async Task Cancelling_running_verification_finishes_task()
+    {
+        await using var f = await Fixture.CreateAsync(); f.Cloud.DeferVerification = true;
+        var w = f.Workspace; var id = (await w.ImportAsync(f.Disk, [f.File("running-check.txt", "content")])).Single();
+        await w.RunOnceAsync();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Cloud.DuringVerification = async ct => { entered.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, ct); };
+        var verification = w.RunOnceAsync();
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            w.Cancel(id);
+            await verification.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(OperationState.Completed, w.Store.GetOperation(id)!.State);
+            Assert.False(await w.RunOnceAsync());
+        }
+        finally { w.PreemptVerification(); await verification; }
+    }
+
+    [Fact]
+    public async Task Verification_parked_by_older_cancel_blocks_dependents_visibly_and_can_be_finished()
+    {
+        await using var f = await Fixture.CreateAsync(); f.Cloud.DeferVerification = true;
+        var w = f.Workspace; var id = (await w.ImportAsync(f.Disk, [f.File("legacy.txt", "content")])).Single();
+        await w.RunOnceAsync();
+        // State left behind by the previous Cancel implementation.
+        w.Store.UpdateOperation(id, o => o with { State = OperationState.Uncertain, RetryAfter = DateTimeOffset.MaxValue });
+        var entry = w.Store.GetOperation(id)!.EntryId;
+        await w.DeleteAsync(entry); await f.DrainAsync();
+        var delete = w.Store.Operations().Single(o => o.Kind == OperationKind.Delete);
+        Assert.Equal(OperationState.Blocked, delete.State);
+        Assert.True(w.DeleteTask(id));
+        Assert.Null(w.Store.GetOperation(id));
+        await f.DrainAsync();
+        Assert.Equal(OperationState.Completed, w.Store.GetOperation(delete.Id)!.State);
+    }
 }

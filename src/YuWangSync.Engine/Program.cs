@@ -41,7 +41,7 @@ public sealed class EngineHost : IAsyncDisposable
     private readonly SemaphoreSlim _output = new(1, 1), _loginGate = new(1, 1);
     private readonly CancellationTokenSource _done = new();
     private CancellationTokenSource? _transfer, _loginStop;
-    private CancellationTokenSource? _treeStop;
+    private CancellationTokenSource? _treeStop, _sizeStop;
     private Task _treePreload = Task.CompletedTask;
     private ICloudClient? _login;
     private Account? _loginAccount;
@@ -212,13 +212,15 @@ public sealed class EngineHost : IAsyncDisposable
             case "cancelLogin": _loginStop?.Cancel(); return new { };
             case "browse":
                 var folder = Id(p, "folderId"); lock (_stateLock) _folder = folder;
-                await _workspace.BrowseAsync(folder, Flag(p, "force"), _done.Token); return State();
+                await _workspace.BrowseAsync(folder, Flag(p, "force"), _done.Token, probeSizes: false);
+                ProbeSizesInBackground(folder); return State();
             case "loadFolder":
                 await _workspace.BrowseAsync(Id(p, "folderId"), ct: _done.Token, probeSizes: false); return State();
             case "refresh":
                 if (_workspace.Offline && !_workspace.ManualOffline) await _workspace.ReconnectAsync(_done.Token);
                 Guid? current; lock (_stateLock) current = _folder;
-                if (current is { } root) await _workspace.BrowseAsync(root, true, _done.Token); else await _workspace.RefreshTreeAsync(_done.Token);
+                if (current is { } root) { await _workspace.BrowseAsync(root, true, _done.Token, probeSizes: false); ProbeSizesInBackground(root); }
+                else await _workspace.RefreshTreeAsync(_done.Token);
                 return State();
             case "open":
                 using (var foreground = _workspace.BeginForegroundTransfer()) return new { path = await _workspace.OpenAsync(Id(p, "entryId"), BeginTransfer()) };
@@ -240,8 +242,10 @@ public sealed class EngineHost : IAsyncDisposable
                 foreach (var item in p.GetProperty("ids").EnumerateArray()) await _workspace.DeleteAsync(item.GetGuid(), _done.Token); return new { };
             case "retry":
                 if (_workspace.Offline && !_workspace.ManualOffline) await _workspace.ReconnectAsync(_done.Token);
-                _workspace.Retry(Id(p, "operationId")); return new { };
+                await _workspace.RetryAsync(Id(p, "operationId"), _done.Token); return new { };
             case "cancel": _workspace.Cancel(Id(p, "operationId")); return new { };
+            case "deleteTask": return new { removed = _workspace.DeleteTask(Id(p, "operationId")) };
+            case "clearCompleted": return new { count = _workspace.ClearCompleted() };
             case "verifyUpload": _workspace.VerifyUploadNow(Id(p, "operationId")); return new { };
             case "setVerification":
                 var settings = _workspace.Settings;
@@ -266,6 +270,20 @@ public sealed class EngineHost : IAsyncDisposable
             case "shutdown": await DisposeAsync(); return new { };
             default: throw new ArgumentException("未知命令。");
         }
+    }
+    // Real sizes need one direct-link probe per file. Run them after the listing is
+    // returned so entering a folder is not held up; leaving the folder cancels them.
+    private void ProbeSizesInBackground(Guid folder)
+    {
+        var next = CancellationTokenSource.CreateLinkedTokenSource(_done.Token); CancellationTokenSource? previous;
+        lock (_stateLock) { previous = _sizeStop; _sizeStop = next; }
+        previous?.Cancel();
+        _ = Task.Run(async () =>
+        {
+            try { await _workspace.RefreshSizesAsync(folder, next.Token); }
+            catch (OperationCanceledException) { }
+            catch (Exception error) { _workspace.Log?.Invoke("文件大小暂未确认：" + error.Message); }
+        });
     }
     private async Task<object> BeginLoginAsync(JsonElement p)
     {
@@ -306,7 +324,7 @@ public sealed class EngineHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return; _disposed = true; _running = false; _stateTimer.Dispose();
-        _workspace.Changed -= ScheduleState; _transfer?.Cancel(); _loginStop?.Cancel(); _login?.Dispose();
+        _workspace.Changed -= ScheduleState; _transfer?.Cancel(); _loginStop?.Cancel(); _sizeStop?.Cancel(); _login?.Dispose();
         await StopTreePreloadAsync();
         await _workspace.DisposeAsync();
     }

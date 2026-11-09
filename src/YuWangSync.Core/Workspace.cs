@@ -269,31 +269,38 @@ public sealed partial class Workspace : IAsyncDisposable
         var existing = Store.Entries(parent.AccountId);
         var uploading = Store.Operations(parent.AccountId).Where(o => o.Kind == OperationKind.Upload
             && o.State == OperationState.Running && o.MutationStarted && o.TargetParentId == parent.Id).ToArray();
-        var changed = new List<Entry>();
+        var known = new Dictionary<(ulong, ulong, bool), Entry>();
+        foreach (var e in existing) if (!e.IsDiskRoot && e.DiskId == parent.DiskId) known.TryAdd((e.DiskId, e.RemoteId, e.IsDirectory), e);
+        var seen = new HashSet<Guid>(); var inserts = new List<Entry>(); var updates = new List<(Guid, Func<Entry, Entry>)>();
         foreach (var item in result.Items)
         {
-            var entry = existing.FirstOrDefault(e => e.DiskId == parent.DiskId && e.RemoteId == item.Id && e.IsDirectory == item.IsFolder && !e.IsDiskRoot);
+            var entry = known.GetValueOrDefault((parent.DiskId, item.Id, item.IsFolder));
             // A published upload is still being hash-verified. Keep its existing
             // local queue identity rather than adding a second entity during a refresh.
             if (entry is null && !item.IsFolder && uploading.Any(o =>
                 o.Name.Equals(item.Name, StringComparison.OrdinalIgnoreCase)
                 || System.Text.RegularExpressions.Regex.IsMatch(item.Name, "^" + System.Text.RegularExpressions.Regex.Escape(Path.GetFileNameWithoutExtension(o.Name))
                     + @"_[0-9]{6}" + System.Text.RegularExpressions.Regex.Escape(Path.GetExtension(o.Name)) + "$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))) continue;
-            entry ??= new Entry { AccountId = parent.AccountId, DiskId = parent.DiskId, RemoteId = item.Id, IsDirectory = item.IsFolder };
             var stamp = Entry.Stamp(item);
             Entry Update(Entry current) => current with { ParentId = parent.Id, Name = item.Name, DeclaredSize = item.Size,
                 Size = current.SizeStamp == stamp ? current.Size : item.Size,
                 SizeStamp = current.SizeStamp == stamp ? stamp : null,
                 UploadTime = item.UploadTime, RemoteStamp = stamp, RemoteMissing = false };
-            if (existing.Any(e => e.Id == entry.Id)) Store.UpdateEntry(entry.Id, Update);
-            else Store.Save(entries: [Update(entry)]);
-            changed.Add(entry);
+            if (entry is not null) updates.Add((entry.Id, Update));
+            else
+            {
+                entry = new Entry { AccountId = parent.AccountId, DiskId = parent.DiskId, RemoteId = item.Id, IsDirectory = item.IsFolder };
+                inserts.Add(Update(entry)); known[(parent.DiskId, item.Id, item.IsFolder)] = entry;
+            }
+            seen.Add(entry.Id);
         }
-        foreach (var missing in existing.Where(e => e.ParentId == parent.Id && e.RemoteId != 0 && changed.All(c => c.Id != e.Id)))
-            Store.UpdateEntry(missing.Id, current => current.ParentId == parent.Id && current.RemoteId == missing.RemoteId ? current with { RemoteMissing = true } : current);
-        Store.UpdateEntry(parent.Id, current => current with { LastListed = DateTimeOffset.UtcNow, Permission = result.Permission });
+        foreach (var missing in existing.Where(e => e.ParentId == parent.Id && e.RemoteId != 0 && !seen.Contains(e.Id)))
+            updates.Add((missing.Id, current => current.ParentId == parent.Id && current.RemoteId == missing.RemoteId ? current with { RemoteMissing = true } : current));
+        updates.Add((parent.Id, current => current with { LastListed = DateTimeOffset.UtcNow, Permission = result.Permission }));
+        // One transaction per listing: per-item commits with synchronous=FULL made entering large folders slow.
+        Store.UpdateEntries(inserts, updates);
     }
-    private async Task RefreshSizesAsync(Guid parent, CancellationToken ct)
+    public async Task RefreshSizesAsync(Guid parent, CancellationToken ct = default)
     {
         var entries = Children(parent).Where(e => !e.IsDirectory && e.RemoteId != 0 && e.SizeStamp != e.RemoteStamp).ToArray();
         await Parallel.ForEachAsync(entries, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct }, async (entry, token) =>

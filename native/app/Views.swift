@@ -261,6 +261,11 @@ struct TaskPane: View {
                 }.width(min: 110, ideal: 130)
                 TableColumn("说明") { Text($0.error ?? "").foregroundStyle(.secondary).lineLimit(1).help($0.error ?? "") }
             }
+            .contextMenu(forSelectionType: String.self) { ids in
+                Button("删除任务", role: .destructive) { model.deleteTasks(ids) }.disabled(ids.isEmpty)
+                Divider()
+                Button("清除已完成") { model.clearCompletedTasks() }.disabled(!operations.contains { $0.state == "completed" })
+            }
             .overlay {
                 if operations.isEmpty {
                     ContentUnavailableView("没有任务", systemImage: "checkmark.circle",

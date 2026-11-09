@@ -80,6 +80,66 @@ public sealed class Fixture : IAsyncDisposable
 
 public sealed class WorkspaceTests
 {
+    [Fact] public async Task Cancel_discards_snapshot_and_retry_recaptures_only_unchanged_source()
+    {
+        await using var f = await Fixture.CreateAsync(); var w = f.Workspace; w.SetPaused(true);
+        var source = f.File("drop.txt", "original");
+        var id = (await w.ImportAsync(f.Disk, [source])).Single(); var snapshot = w.Store.GetOperation(id)!.SnapshotPath!;
+        Assert.True(System.IO.File.Exists(snapshot));
+        w.Cancel(id);
+        Assert.False(System.IO.File.Exists(snapshot));
+        Assert.Null(w.Store.GetOperation(id)!.SnapshotPath);
+        Assert.NotNull(w.Store.GetOperation(id)!.SnapshotHash);
+        await w.RetryAsync(id);
+        Assert.True(System.IO.File.Exists(w.Store.GetOperation(id)!.SnapshotPath));
+        w.SetPaused(false); await f.DrainAsync();
+        Assert.Equal(OperationState.Completed, w.Store.GetOperation(id)!.State);
+        Assert.Contains(f.Cloud.Items.Values, i => i.Name == "drop.txt" && Encoding.UTF8.GetString(i.Data) == "original");
+
+        w.SetPaused(true);
+        var changed = f.File("changed.txt", "first");
+        var second = (await w.ImportAsync(f.Disk, [changed])).Single(); w.Cancel(second);
+        await System.IO.File.WriteAllTextAsync(changed, "second");
+        await Assert.ThrowsAsync<IOException>(() => w.RetryAsync(second));
+        Assert.Equal(OperationState.Cancelled, w.Store.GetOperation(second)!.State);
+        // The failed recapture leaves nothing behind; only the completed upload's snapshot remains.
+        Assert.Equal([w.Store.GetOperation(id)!.SnapshotPath!], Directory.GetFiles(f.Files.SnapshotDirectory(f.Account.Id)));
+    }
+    [Fact] public async Task Cancel_keeps_snapshot_of_request_that_may_have_landed()
+    {
+        await using var f = await Fixture.CreateAsync(); var w = f.Workspace; w.SetPaused(true);
+        var id = (await w.ImportAsync(f.Disk, [f.File("sent-keep.txt", "keep")])).Single();
+        w.Store.UpdateOperation(id, o => o with { MutationStarted = true });
+        w.Cancel(id);
+        Assert.True(System.IO.File.Exists(w.Store.GetOperation(id)!.SnapshotPath));
+    }
+    [Fact] public async Task Clear_completed_keeps_unfinished_tasks_and_their_dependency_chain()
+    {
+        await using var f = await Fixture.CreateAsync(); var w = f.Workspace;
+        var upload = (await w.ImportAsync(f.Disk, [f.File("chain.txt", "chain")])).Single();
+        w.Rename(w.Store.GetOperation(upload)!.EntryId, "chain-renamed.txt");
+        await w.RunOnceAsync();
+        Assert.Equal(OperationState.Completed, w.Store.GetOperation(upload)!.State);
+        Assert.Equal(1, w.ClearCompleted());
+        Assert.Null(w.Store.GetOperation(upload));
+        var rename = Assert.Single(w.Store.Operations());
+        Assert.Empty(rename.Dependencies);
+        await f.DrainAsync();
+        Assert.Equal(OperationState.Completed, w.Store.GetOperation(rename.Id)!.State);
+        Assert.Contains(f.Cloud.Items.Values, i => i.Name == "chain-renamed.txt");
+    }
+    [Fact] public async Task Delete_task_cancels_unsent_work_but_keeps_requests_that_may_have_landed()
+    {
+        await using var f = await Fixture.CreateAsync(); var w = f.Workspace;
+        w.SetPaused(true);
+        var queued = (await w.ImportAsync(f.Disk, [f.File("queued.txt", "q")])).Single();
+        Assert.True(w.DeleteTask(queued));
+        Assert.Empty(w.Store.Operations());
+        var sent = (await w.ImportAsync(f.Disk, [f.File("sent.txt", "s")])).Single();
+        w.Store.UpdateOperation(sent, o => o with { MutationStarted = true });
+        Assert.False(w.DeleteTask(sent));
+        Assert.Equal(OperationState.Uncertain, w.Store.GetOperation(sent)!.State);
+    }
     [Fact] public async Task Unavailable_secret_store_keeps_cached_account_browsable()
     {
         var root = Path.Combine(Path.GetTempPath(), "YuWangSync-secret-failure-" + Guid.NewGuid().ToString("N"));
@@ -112,7 +172,7 @@ public sealed class WorkspaceTests
         await w.ScanEditsAsync(); await Task.Delay(2100); await w.ScanEditsAsync();
         var op = Assert.Single(w.Store.Operations()); w.Cancel(op.Id); await w.ScanEditsAsync();
         Assert.Equal(OperationState.Cancelled, Assert.Single(w.Store.Operations()).State); Assert.False(await w.RunOnceAsync());
-        w.Retry(op.Id); await f.DrainAsync(); Assert.Equal(OperationState.Completed, w.Store.GetOperation(op.Id)!.State);
+        await w.RetryAsync(op.Id); await f.DrainAsync(); Assert.Equal(OperationState.Completed, w.Store.GetOperation(op.Id)!.State);
     }
     [Fact] public async Task Last_selected_account_is_persisted()
     {
@@ -197,7 +257,7 @@ public sealed class WorkspaceTests
         f.Cloud.LoseReply = true; await f.Workspace.RunOnceAsync();
         Assert.Equal(OperationState.Uncertain, f.Workspace.Store.GetOperation(ids[0])!.State);
         Assert.NotEqual(0ul, f.Workspace.Store.GetOperation(ids[0])!.NewRemoteId);
-        await f.ReopenAsync(); f.Workspace.Retry(ids[0]); await f.DrainAsync();
+        await f.ReopenAsync(); await f.Workspace.RetryAsync(ids[0]); await f.DrainAsync();
         Assert.Equal(1, f.Cloud.UploadCalls); Assert.Equal(OperationState.Completed, f.Workspace.Store.GetOperation(ids[0])!.State);
     }
     [Theory] [InlineData(DirectoryPermission.ReadOnly)] [InlineData(DirectoryPermission.Unknown)]

@@ -221,7 +221,31 @@ final class AppModel: ObservableObject {
     func retryTask() { guard let op = selectedOperation else { return }; perform { _ = try await self.send("retry", ["operationId": op.id]) } }
     func cancelTask() {
         guard let op = selectedOperation else { return }
-        perform { if await self.confirm("取消任务“\(op.name)”？", detail: "依赖它的未发送任务会一并取消。已发送的请求会保留记录以便核对结果，本地修改不会被删除。", button: "取消任务") { _ = try await self.send("cancel", ["operationId": op.id]) } }
+        perform { if await self.confirm("取消任务“\(op.name)”？", detail: "依赖它的未发送任务会一并取消；等待下载校验的上传将跳过校验并结束。取消后删除该任务的待传快照，原文件和本地副本不受影响。已发送且结果未确认的请求会保留记录和快照以便核对。", button: "取消任务") { _ = try await self.send("cancel", ["operationId": op.id]) } }
+    }
+    func deleteTasks(_ ids: Set<String>) {
+        let ops = state?.operations.filter { ids.contains($0.id) } ?? []
+        guard !ops.isEmpty else { return }
+        perform {
+            if ops.contains(where: { !$0.isTerminal }) {
+                let title = ops.count == 1 ? "删除任务“\(ops[0].name)”？" : "删除 \(ops.count) 项任务？"
+                guard await self.confirm(title, detail: "未结束的任务会先取消，依赖它的未发送任务一并取消；等待下载校验的上传将跳过校验。取消的任务会删除待传快照，原文件和本地副本不受影响。已发送且结果未确认的请求会保留记录和快照以便核对。", button: "删除任务") else { return }
+            }
+            var kept: [CloudOperation] = []
+            for op in ops {
+                let result = try await self.send("deleteTask", ["operationId": op.id])
+                if result["removed"] as? Bool != true { kept.append(op) }
+            }
+            if let selected = self.taskSelection, ids.contains(selected), !kept.contains(where: { $0.id == selected }) { self.taskSelection = nil }
+            self.message = kept.isEmpty ? "已删除任务记录。" : "“\(kept.map(\.name).joined(separator: "”、“"))”的请求可能已生效，已停止并保留记录，请核对或重试。"
+        }
+    }
+    func clearCompletedTasks() {
+        perform {
+            let count = try await self.send("clearCompleted")["count"] as? Int ?? 0
+            if let selected = self.selectedOperation, selected.state == "completed" { self.taskSelection = nil }
+            self.message = count == 0 ? "没有已完成的任务。" : "已清除 \(count) 项已完成任务。"
+        }
     }
     func verifyTaskNow() {
         guard let op = selectedOperation, op.state == "awaitingVerification" else { return }

@@ -18,6 +18,9 @@ public interface IOperationStore : IDisposable
     void Save(IEnumerable<Entry>? entries = null, IEnumerable<Operation>? operations = null);
     void UpdateEntry(Guid id, Func<Entry, Entry> update);
     void UpdateOperation(Guid id, Func<Operation, Operation> update);
+    // Applies many read-modify-write entry updates in one transaction (one fsync).
+    void UpdateEntries(IEnumerable<Entry> inserts, IEnumerable<(Guid Id, Func<Entry, Entry> Update)> updates);
+    void RemoveOperations(IEnumerable<Guid> ids, IEnumerable<Operation> rewritten);
     void SaveTree(Guid account, IReadOnlyList<DiskTreeNode> nodes);
     IReadOnlyList<DiskTreeNode> Tree(Guid account);
 }
@@ -117,20 +120,54 @@ public sealed class OperationStore : IOperationStore
         lock (_gate)
         {
             using var tx = _db.BeginTransaction();
-            foreach (var entry in entries ?? [])
+            SaveCore(tx, entries, operations);
+            tx.Commit();
+        }
+    }
+    private void SaveCore(SqliteTransaction tx, IEnumerable<Entry>? entries, IEnumerable<Operation>? operations)
+    {
+        foreach (var entry in entries ?? [])
+        {
+            using var cmd = _db.CreateCommand(); cmd.Transaction = tx;
+            cmd.CommandText = "INSERT INTO entries VALUES($id,$a,$j) ON CONFLICT(id) DO UPDATE SET account=$a,json=$j";
+            cmd.Parameters.AddWithValue("$id", entry.Id.ToString()); cmd.Parameters.AddWithValue("$a", entry.AccountId.ToString());
+            cmd.Parameters.AddWithValue("$j", JsonSerializer.Serialize(entry, Json)); cmd.ExecuteNonQuery();
+        }
+        foreach (var op in operations ?? [])
+        {
+            using var cmd = _db.CreateCommand(); cmd.Transaction = tx;
+            cmd.CommandText = "INSERT INTO operations VALUES($id,$a,$c,$j) ON CONFLICT(id) DO UPDATE SET json=$j";
+            cmd.Parameters.AddWithValue("$id", op.Id.ToString()); cmd.Parameters.AddWithValue("$a", op.AccountId.ToString());
+            cmd.Parameters.AddWithValue("$c", op.Created.ToString("O")); cmd.Parameters.AddWithValue("$j", JsonSerializer.Serialize(op, Json)); cmd.ExecuteNonQuery();
+        }
+    }
+    public void UpdateEntries(IEnumerable<Entry> inserts, IEnumerable<(Guid Id, Func<Entry, Entry> Update)> updates)
+    {
+        lock (_gate)
+        {
+            var changed = new Dictionary<Guid, Entry>();
+            foreach (var entry in inserts) changed[entry.Id] = entry;
+            foreach (var (id, update) in updates)
+            {
+                var current = changed.GetValueOrDefault(id) ?? GetEntry(id);
+                if (current is not null) changed[id] = update(current);
+            }
+            using var tx = _db.BeginTransaction();
+            SaveCore(tx, changed.Values, null);
+            tx.Commit();
+        }
+    }
+    public void RemoveOperations(IEnumerable<Guid> ids, IEnumerable<Operation> rewritten)
+    {
+        lock (_gate)
+        {
+            using var tx = _db.BeginTransaction();
+            foreach (var id in ids)
             {
                 using var cmd = _db.CreateCommand(); cmd.Transaction = tx;
-                cmd.CommandText = "INSERT INTO entries VALUES($id,$a,$j) ON CONFLICT(id) DO UPDATE SET account=$a,json=$j";
-                cmd.Parameters.AddWithValue("$id", entry.Id.ToString()); cmd.Parameters.AddWithValue("$a", entry.AccountId.ToString());
-                cmd.Parameters.AddWithValue("$j", JsonSerializer.Serialize(entry, Json)); cmd.ExecuteNonQuery();
+                cmd.CommandText = "DELETE FROM operations WHERE id=$id"; cmd.Parameters.AddWithValue("$id", id.ToString()); cmd.ExecuteNonQuery();
             }
-            foreach (var op in operations ?? [])
-            {
-                using var cmd = _db.CreateCommand(); cmd.Transaction = tx;
-                cmd.CommandText = "INSERT INTO operations VALUES($id,$a,$c,$j) ON CONFLICT(id) DO UPDATE SET json=$j";
-                cmd.Parameters.AddWithValue("$id", op.Id.ToString()); cmd.Parameters.AddWithValue("$a", op.AccountId.ToString());
-                cmd.Parameters.AddWithValue("$c", op.Created.ToString("O")); cmd.Parameters.AddWithValue("$j", JsonSerializer.Serialize(op, Json)); cmd.ExecuteNonQuery();
-            }
+            SaveCore(tx, null, rewritten);
             tx.Commit();
         }
     }

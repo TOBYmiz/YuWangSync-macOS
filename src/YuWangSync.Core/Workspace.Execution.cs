@@ -104,7 +104,10 @@ public sealed partial class Workspace
             foreach (var candidate in all.Where(o => o.State is OperationState.Queued or OperationState.Uncertain && (o.RetryAfter is null || o.RetryAfter <= DateTimeOffset.UtcNow)))
             {
                 var dependencies = candidate.Dependencies.Select(Store.GetOperation).ToArray();
-                if (dependencies.Any(d => d is null || d.State is OperationState.Cancelled or OperationState.Failed or OperationState.Blocked))
+                // A dependency the user stopped mid-request never runs again by itself; surface
+                // the dependent as blocked instead of leaving it queued forever.
+                if (dependencies.Any(d => d is null || d.State is OperationState.Cancelled or OperationState.Failed or OperationState.Blocked
+                    || d.State == OperationState.Uncertain && d.RetryAfter == DateTimeOffset.MaxValue))
                 { Store.UpdateOperation(candidate.Id, o => o with { State = OperationState.Blocked, Error = "依赖任务需要先处理。" }); continue; }
                 if (dependencies.Any(d => d!.State != OperationState.Completed)) continue;
                 op = candidate; Store.UpdateOperation(op.Id, o => o with { State = OperationState.Running, Error = null }); break;
@@ -131,7 +134,7 @@ public sealed partial class Workspace
             await WithCloudAsync(account.Id, async (cloud, token) =>
             { await ExecuteAsync(Store.GetOperation(op.Id)! with { RunVerification = op.RunVerification }, cloud, token); return true; }, linked.Token);
         }
-        catch (UploadVerificationPendingException pending)
+        catch (UploadVerificationPendingException pending) when (Store.GetOperation(op.Id) is not { IsTerminal: true })
         {
             var entry = FromRemote(RequireEntry(op.EntryId), pending.Candidate, op.TargetParentId!.Value);
             Remember(op.Id, current => current with { NewRemoteId = pending.Candidate.Id,
@@ -167,7 +170,8 @@ public sealed partial class Workspace
         catch (Exception e)
         {
             if (e is HttpRequestException or TimeoutException) { Offline = true; ConnectionStatus = "连接中断，待办已保留"; }
-            Store.UpdateOperation(op.Id, current => current with
+            // A cancel may have finished the task meanwhile (e.g. its snapshot was discarded).
+            Store.UpdateOperation(op.Id, current => current.IsTerminal ? current : current with
             {
                 State = e is ConflictException or UnauthorizedAccessException ? OperationState.Blocked
                     : op.RunVerification ? OperationState.AwaitingVerification : current.MutationStarted ? OperationState.Uncertain : e is HttpRequestException or TimeoutException ? OperationState.Queued : OperationState.Failed,

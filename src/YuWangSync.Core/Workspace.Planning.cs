@@ -170,6 +170,21 @@ public sealed partial class Workspace
     {
         var op = Store.GetOperation(operationId) ?? throw new IOException("任务不存在。");
         if (op.IsTerminal) return;
+        if (VerificationPending(op))
+        {
+            // The upload was already acknowledged and the entry points at the candidate.
+            // Cancelling only drops the optional download check; nothing is deleted and
+            // an overwrite backup stays in the cloud for the user to inspect.
+            lock (_metadataGate)
+            {
+                CompleteCore(op, RequireEntry(op.EntryId) with { Status = "已上传 · 未下载校验" });
+                Remember(op.Id, o => o with { Error = op.OldRemoteId != 0 && op.BackupName is { } backup
+                    ? $"已取消下载校验；原文件备份“{backup}”保留在云端。" : "已取消下载校验，云端文件保留。" });
+            }
+            if (_runningId == operationId) _currentStop?.Cancel();
+            DiscardSnapshots(op.AccountId, [op.Id]);
+            Notify(); return;
+        }
         if (op.State == OperationState.Running || op.MutationStarted)
         {
             if (_runningId == operationId) _currentStop?.Cancel();
@@ -186,15 +201,98 @@ public sealed partial class Workspace
             CancelledBy = o.Id == operationId ? null : operationId, Error = "用户取消，相关本地内容保留。" }).ToArray();
         var newEntries = updates.Select(o => Store.GetEntry(o.EntryId)).OfType<Entry>().Where(e => e.RemoteId == 0).DistinctBy(e => e.Id)
             .Select(e => e with { RemoteMissing = true });
-        Store.Save(newEntries, updates); Notify();
+        Store.Save(newEntries, updates);
+        DiscardSnapshots(op.AccountId, cancelled); Notify();
     }
-    public void Retry(Guid operationId)
+    // Cancelled work no longer needs its private copy. Only finished tasks are touched:
+    // a request that may already have reached the cloud keeps its snapshot for recovery,
+    // and a file still referenced by any unfinished task is left alone. The hash stays on
+    // the record so edit scanning still recognises the cancelled content and Retry can
+    // recapture an unchanged source.
+    private void DiscardSnapshots(Guid account, IEnumerable<Guid> operationIds)
+    {
+        var ids = operationIds.ToHashSet(); var all = Store.Operations(account);
+        var inUse = all.Where(o => !o.IsTerminal && o.SnapshotPath is not null).Select(o => o.SnapshotPath!).ToHashSet(StringComparer.Ordinal);
+        foreach (var op in all.Where(o => ids.Contains(o.Id) && o.IsTerminal && o.SnapshotPath is not null))
+        {
+            var path = op.SnapshotPath!;
+            if (inUse.Contains(path) || !Files.Owns(path)) continue;
+            try { if (File.Exists(path)) { LocalFiles.RejectLinks(path); File.Delete(path); } }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            { Log?.Invoke("取消任务的快照暂未删除：" + e.Message); continue; }
+            Store.UpdateOperation(op.Id, o => o.SnapshotPath == path ? o with { SnapshotPath = null } : o);
+        }
+    }
+    private bool VerificationPending(Operation op) => op.Kind == OperationKind.Upload && op.VerificationStamp is not null && op.NewRemoteId != 0
+        && (op.State == OperationState.AwaitingVerification
+            || op.State == OperationState.Running && _runningId == op.Id && _verifying
+            // Older builds parked a cancelled verification here permanently.
+            || op.State == OperationState.Uncertain && op.RetryAfter == DateTimeOffset.MaxValue)
+        && Store.GetEntry(op.EntryId) is { } entry && entry.RemoteId == op.NewRemoteId && entry.RemoteStamp == op.VerificationStamp;
+
+    /// <summary>Removes a task record. Unfinished tasks are cancelled first; a task whose request
+    /// may already have taken effect keeps its record for verification and returns false.</summary>
+    public bool DeleteTask(Guid operationId)
+    {
+        var op = Store.GetOperation(operationId) ?? throw new IOException("任务不存在。");
+        if (op.AccountId != ActiveAccount?.Id) throw new InvalidOperationException("请先切换至该任务所属账号。");
+        if (!op.IsTerminal) Cancel(operationId);
+        if (Store.GetOperation(operationId) is not { IsTerminal: true }) return false;
+        RemoveTasks(op.AccountId, [operationId]); return true;
+    }
+    public int ClearCompleted()
+    {
+        var account = ActiveAccount?.Id ?? throw new InvalidOperationException("请先选择账号。");
+        var ids = Store.Operations(account).Where(o => o.State == OperationState.Completed).Select(o => o.Id).ToArray();
+        RemoveTasks(account, ids); return ids.Length;
+    }
+    private void RemoveTasks(Guid account, IReadOnlyCollection<Guid> ids)
+    {
+        if (ids.Count == 0) return;
+        lock (_metadataGate)
+        {
+            var all = Store.Operations(account); var removed = ids.ToHashSet();
+            var targets = all.Where(o => removed.Contains(o.Id)).ToArray();
+            if (targets.Any(o => !o.IsTerminal)) throw new InvalidOperationException("任务尚未结束，不能删除记录。");
+            var cancelled = targets.Where(o => o.State == OperationState.Cancelled).Select(o => o.Id).ToHashSet();
+            if (all.Any(o => !o.IsTerminal && o.Dependencies.Any(cancelled.Contains)))
+                throw new InvalidOperationException("仍有未结束的任务依赖这项已取消的任务，请先处理后续任务。");
+            // A completed dependency is satisfied; drop the reference so dependents keep running.
+            var rewritten = all.Where(o => !removed.Contains(o.Id) && o.Dependencies.Any(removed.Contains))
+                .Select(o => o with { Dependencies = o.Dependencies.Where(d => !removed.Contains(d)).ToList() }).ToArray();
+            Store.RemoveOperations(removed, rewritten);
+        }
+        Notify();
+    }
+    public async Task RetryAsync(Guid operationId, CancellationToken ct = default)
     {
         var op = Store.GetOperation(operationId) ?? throw new IOException("任务不存在。");
         if (op.State == OperationState.Completed) return;
         var restore = Store.Operations(op.AccountId).Where(o => o.Id == operationId || o.State == OperationState.Cancelled && o.CancelledBy == operationId)
             .Select(o => o with { State = o.MutationStarted ? OperationState.Uncertain : OperationState.Queued, RetryAfter = null, Error = null, CancelledBy = null }).ToArray();
-        Store.Save(entries: restore.Select(o => Store.GetEntry(o.EntryId)).OfType<Entry>().Where(e => e.RemoteId == 0).DistinctBy(e => e.Id).Select(e => e with { RemoteMissing = false }), operations: restore);
+        var captured = new List<string>();
+        try
+        {
+            for (var i = 0; i < restore.Length; i++)
+            {
+                var item = restore[i];
+                if (item.Kind != OperationKind.Upload || item.SnapshotPath is not null || item.SnapshotHash is null) continue;
+                // The snapshot was discarded on cancel; only an unchanged source may stand in for it.
+                if (item.SourcePath is not { } source || !File.Exists(source))
+                    throw new IOException($"“{item.Name}”的快照已在取消时删除，源文件也已不在，请重新上传。");
+                var snapshot = await _snapshots.CaptureAsync(source, Files.SnapshotDirectory(item.AccountId), ct);
+                captured.Add(snapshot.Path);
+                if (snapshot.Hash != item.SnapshotHash || snapshot.Length != item.SnapshotLength)
+                    throw new IOException($"“{item.Name}”在取消后已被修改，原快照已删除，请重新上传。");
+                restore[i] = item with { SnapshotPath = snapshot.Path };
+            }
+            Store.Save(entries: restore.Select(o => Store.GetEntry(o.EntryId)).OfType<Entry>().Where(e => e.RemoteId == 0).DistinctBy(e => e.Id).Select(e => e with { RemoteMissing = false }), operations: restore);
+        }
+        catch
+        {
+            foreach (var path in captured) try { File.Delete(path); } catch (IOException) { }
+            throw;
+        }
         Notify();
     }
     public async Task ResolveAsync(Guid operationId, CollisionChoice choice, string? newName = null, CancellationToken ct = default)

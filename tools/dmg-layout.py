@@ -1,9 +1,9 @@
 """Write or verify Finder layout on a mounted image, without scripting Finder."""
 
 import argparse
-import os
 import pathlib
 import struct
+import subprocess
 
 from ds_store import DSStore
 from mac_alias import Alias
@@ -65,9 +65,15 @@ def verify_layout(mount):
             assert store[name]["Iloc"] == position, f"Incorrect position: {name}"
             assert (mount / name).exists(), f"Missing installation item: {name}"
     assert (mount / ".background.tiff").stat().st_size > 0
-    info = os.getxattr(mount / "安装说明.txt", "com.apple.FinderInfo")
+    # CPython exposes os.getxattr on Linux, but not on the macOS runner.
+    def attribute(name):
+        return bytes.fromhex(subprocess.check_output([
+            "/usr/bin/xattr", "-px", name, str(mount / "安装说明.txt")
+        ], text=True))
+
+    info = attribute("com.apple.FinderInfo")
     assert struct.unpack_from(">H", info, 8)[0] & 0x0400, "Small custom instruction icon was lost"
-    assert os.getxattr(mount / "安装说明.txt", "com.apple.ResourceFork"), "Instruction icon has no resources"
+    assert attribute("com.apple.ResourceFork"), "Instruction icon has no resources"
     print("DMG layout verified: fixed positions, background, icon view, small instruction icon.")
 
 

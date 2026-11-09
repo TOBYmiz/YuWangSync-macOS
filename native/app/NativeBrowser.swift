@@ -9,6 +9,15 @@ final class DirectoryItem: NSObject {
 
 final class BrowserOutlineView: NSOutlineView {
     var menuForRow: ((Int) -> NSMenu?)?
+    var trackingFinished: (() -> Void)?
+    private(set) var trackingMouse = false
+    private(set) var fullReloadCount = 0
+    override func reloadData() { fullReloadCount += 1; super.reloadData() }
+    override func mouseDown(with event: NSEvent) {
+        trackingMouse = true
+        defer { trackingMouse = false; trackingFinished?() }
+        super.mouseDown(with: event)
+    }
     override func menu(for event: NSEvent) -> NSMenu? {
         menuForRow?(row(at: convert(event.locationInWindow, from: nil)))
     }
@@ -24,10 +33,15 @@ struct NativeDirectoryTree: NSViewRepresentable {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("directory")); column.width = 230
         outline.addTableColumn(column); outline.outlineTableColumn = column; outline.headerView = nil
         outline.style = .sourceList; outline.rowHeight = 25; outline.indentationPerLevel = 14
-        outline.autoresizesOutlineColumn = true; outline.autosaveExpandedItems = false
+        // Fitting the outline column can measure thousands of newly revealed rows.
+        outline.autoresizesOutlineColumn = false; outline.usesAutomaticRowHeights = false
+        outline.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle; outline.autosaveExpandedItems = false
         outline.allowsEmptySelection = true; outline.allowsMultipleSelection = false
         outline.dataSource = context.coordinator; outline.delegate = context.coordinator
         outline.menuForRow = { [weak coordinator = context.coordinator] row in coordinator?.menu(row) }
+        outline.trackingFinished = { [weak coordinator = context.coordinator] in
+            if let coordinator { coordinator.update(coordinator.model) }
+        }
         context.coordinator.outline = outline
         let scroll = NSScrollView(); scroll.documentView = outline; scroll.hasVerticalScroller = true
         scroll.drawsBackground = false; outline.backgroundColor = .clear
@@ -43,31 +57,54 @@ struct NativeDirectoryTree: NSViewRepresentable {
         var expanded = Set<String>(), loading = Set<String>()
         private var accountID: String?
         private var revealRevision = -1
+        private var indexRevision: UUID?
+        private var icons: [String: NSImage] = [:]
         private var applying = false, changingExpansion = false
         init(_ model: AppModel) { self.model = model }
 
         func update(_ model: AppModel) {
             self.model = model
-            guard let outline else { return }
+            guard let outline, !outline.trackingMouse else { return }
             applying = true; defer { applying = false }
-            if accountID != model.state?.activeAccount?.id {
+            let changedAccount = accountID != model.state?.activeAccount?.id
+            if changedAccount {
                 accountID = model.state?.activeAccount?.id; expanded.removeAll(); revealRevision = -1
+                loading.removeAll()
                 outline.collapseItem(nil, collapseChildren: true)
             }
-            let next = model.browserIndex.directories
-            if snapshot != next {
+            if indexRevision != model.browserIndex.revision {
+                indexRevision = model.browserIndex.revision
+                let previous = snapshot, next = model.browserIndex.directories
                 snapshot = next
-                items = next.rows.mapValues { row in
-                    let item = items[row.id] ?? DirectoryItem(row); item.value = row; return item
+                var changedRows: [String] = []
+                for (id, row) in next.rows where previous.rows[id] != row {
+                    let item = items[id] ?? DirectoryItem(row); item.value = row; items[id] = item
+                    if previous.rows[id]?.title != row.title || previous.rows[id]?.symbol != row.symbol
+                        || previous.canExpand(id) != next.canExpand(id) { changedRows.append(id) }
                 }
-                expanded.formIntersection(Set(items.keys))
-                outline.reloadData()
-                // Only visit expanded branches; collapsed descendants never produce views.
-                var stack = snapshot.roots.reversed().map { $0 }
-                while let id = stack.popLast() {
-                    if expanded.contains(id), let item = items[id] {
-                        outline.expandItem(item)
-                        stack.append(contentsOf: (snapshot.children[id] ?? []).reversed())
+                let removed = previous.rows.keys.filter { next.rows[$0] == nil }
+                for id in removed { items.removeValue(forKey: id); expanded.remove(id) }
+                if changedAccount || previous.roots != next.roots {
+                    outline.reloadData()
+                    restoreExpanded(next.roots)
+                } else {
+                    let changedParents = Set(previous.children.keys).union(next.children.keys).filter {
+                        previous.children[$0] != next.children[$0] && next.rows[$0] != nil
+                    }
+                    // Reload only changed branches. A LastListed/metadata update must
+                    // not reload the entire tree and replay every expansion.
+                    let branches = Set(changedParents)
+                    let top = branches.filter { id in !next.ancestors(of: id).contains(where: branches.contains) }
+                    for id in top {
+                        guard let item = items[id] else { continue }
+                        let open = outline.isItemExpanded(item)
+                        outline.reloadItem(item, reloadChildren: open)
+                        if open { restoreExpanded([id]) }
+                    }
+                    for id in changedRows where !branches.contains(id) {
+                        if let item = items[id], outline.row(forItem: item) >= 0 {
+                            outline.reloadItem(item, reloadChildren: false)
+                        }
                     }
                 }
             }
@@ -83,6 +120,16 @@ struct NativeDirectoryTree: NSViewRepresentable {
             let row = model.sidebarSelection.flatMap { items[$0] }.map { outline.row(forItem: $0) } ?? -1
             let selection = row >= 0 ? IndexSet(integer: row) : IndexSet()
             if outline.selectedRowIndexes != selection { outline.selectRowIndexes(selection, byExtendingSelection: false) }
+        }
+        private func restoreExpanded(_ roots: [String]) {
+            guard let outline else { return }
+            var stack = roots.reversed().map { $0 }
+            while let id = stack.popLast() {
+                if expanded.contains(id), let item = items[id] {
+                    if !outline.isItemExpanded(item) { outline.expandItem(item) }
+                    stack.append(contentsOf: (snapshot.children[id] ?? []).reversed())
+                }
+            }
         }
         func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
             if let item = item as? DirectoryItem { return snapshot.children[item.value.id]?.count ?? 0 }
@@ -102,7 +149,8 @@ struct NativeDirectoryTree: NSViewRepresentable {
             guard let item = item as? DirectoryItem else { return nil }
             let cell = browserCell(outlineView, identifier: "directory-cell")
             cell.textField?.stringValue = item.value.title
-            cell.imageView?.image = NSImage(systemSymbolName: item.value.symbol, accessibilityDescription: nil)
+            if icons[item.value.symbol] == nil { icons[item.value.symbol] = NSImage(systemSymbolName: item.value.symbol, accessibilityDescription: nil) }
+            cell.imageView?.image = icons[item.value.symbol]
             return cell
         }
         func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -214,7 +262,31 @@ struct NativeFileTable: NSViewRepresentable {
             let changedFolder = folderID != model.state?.folderId
             folderID = model.state?.folderId
             if entries != source {
-                source = entries; sortRows(); table.reloadData()
+                let order = table.sortDescriptors
+                let needsSort = entries.count != source.count || zip(entries, source).contains { a, b in
+                    if a.id != b.id || a.isDirectory != b.isDirectory { return true }
+                    return order.contains { descriptor in
+                        switch descriptor.key {
+                        case "size": return a.size != b.size
+                        case "date": return a.uploadTime != b.uploadTime
+                        case "status": return a.status != b.status
+                        default: return a.name != b.name
+                        }
+                    }
+                }
+                source = entries
+                if needsSort { sortRows(); table.reloadData() }
+                else {
+                    var changed = IndexSet()
+                    for entry in entries {
+                        guard let row = rowByID[entry.id] else { continue }
+                        let old = rows[row]
+                        if old.name != entry.name || old.isDirectory != entry.isDirectory || old.sizeLabel != entry.sizeLabel
+                            || old.uploadTime != entry.uploadTime || old.status != entry.status { changed.insert(row) }
+                        rows[row] = entry
+                    }
+                    if !changed.isEmpty { table.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns)) }
+                }
                 if changedFolder && !rows.isEmpty { table.scrollRowToVisible(0) }
             }
             restoreSelection()

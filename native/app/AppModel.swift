@@ -7,7 +7,8 @@ import Network
 final class AppModel: ObservableObject {
     static let shared = AppModel()
     let bridge = EngineBridge()
-    @Published var state: ClientState? { didSet { browserIndex = BrowserIndex(state) } }
+    @Published var state: ClientState? { didSet { browserIndex = preparedIndex ?? BrowserIndex(state) } }
+    private var preparedIndex: BrowserIndex?
     private(set) var browserIndex = BrowserIndex()
     @Published private(set) var sidebarRevealRevision = 0
     private(set) var sidebarRevealID: String?
@@ -97,11 +98,11 @@ final class AppModel: ObservableObject {
     func start() {
         guard !started else { return }; started = true
         NativeDiagnostics.write("model start")
-        bridge.onState = { [weak self] state in
+        bridge.onState = { [weak self] state, index in
             guard let self else { return }
             let previous = self.state?.folderId
             if self.state?.activeAccount?.id != state.activeAccount?.id { self.sidebarRevealID = nil }
-            self.state = state
+            self.apply(state, index: index)
             self.reportNetworkCost()
             if let operation = self.transfer?.operationId, !state.operations.contains(where: { $0.id == operation && $0.state == "running" }) { self.transfer = nil }
             NativeDiagnostics.write("state received entries=\(state.entries.count) operations=\(state.operations.count)")
@@ -119,6 +120,11 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.networkCost = cost; self?.reportNetworkCost() }
         }
         networkMonitor.start(queue: DispatchQueue(label: "YuWangSync.network-cost"))
+    }
+    func apply(_ state: ClientState, index: BrowserIndex) {
+        preparedIndex = index
+        self.state = state
+        preparedIndex = nil
     }
     func stopMonitoring() { networkMonitor.cancel() }
     private func reportNetworkCost() {

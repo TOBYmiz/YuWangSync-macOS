@@ -30,6 +30,7 @@ struct DirectorySnapshot: Equatable {
 
 // Build adjacency lists once per engine snapshot. Never scan all entries per tree node.
 struct BrowserIndex {
+    let revision = UUID()
     var entries: [String: CloudEntry] = [:]
     var filesByParent: [String: [CloudEntry]] = [:]
     var directories = DirectorySnapshot()

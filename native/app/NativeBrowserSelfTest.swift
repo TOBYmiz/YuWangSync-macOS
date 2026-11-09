@@ -65,7 +65,7 @@ enum NativeBrowserSelfTest {
         for index in 0..<10_000 {
             entries.append(CloudEntry(id: "interaction-folder-\(index)", accountId: root.accountId, parentId: root.id,
                 diskId: root.diskId, remoteId: UInt64(1000 + index), name: String(format: "目录 %05d", index), isDirectory: true, isDiskRoot: false,
-                size: nil, sizeLabel: "—", uploadTime: stamp, localPath: nil, lastListed: stamp, status: "云端"))
+                size: nil, sizeLabel: "—", uploadTime: stamp, localPath: nil, lastListed: index < 64 ? nil : stamp, status: "云端"))
         }
         for index in 0..<10 {
             entries.append(CloudEntry(id: "interaction-file-\(index)", accountId: root.accountId, parentId: root.id,
@@ -93,7 +93,7 @@ enum NativeBrowserSelfTest {
         defer { window.close(); AppDelegate.shared?.mainWindow?.makeKeyAndOrderFront(nil) }
         try await Task.sleep(nanoseconds: 250_000_000)
         NativeDiagnostics.write("browser interaction: controls mounted")
-        guard let outline = find(NSOutlineView.self, in: window.contentView, identifier: "cloud-outline"),
+        guard let outline = find(BrowserOutlineView.self, in: window.contentView, identifier: "cloud-outline"),
               let table = find(NSTableView.self, in: window.contentView, identifier: "cloud-files") else { throw BridgeError(message: "原生文件浏览控件未就绪。") }
         checks["two-drive-groups-collapsed"] = outline.numberOfRows == 2
         guard let drive = outline.item(atRow: 0) else { throw BridgeError(message: "驱动器自检行缺失。") }
@@ -114,6 +114,75 @@ enum NativeBrowserSelfTest {
         NativeDiagnostics.write("browser interaction: large drive collapse finished")
         checks["large-drive-collapse"] = outline.numberOfRows == 4 && ProcessInfo.processInfo.systemUptime - collapseStart < 5
         checks["drive-collapse-no-navigation"] = test.state?.folderId == root.id && test.errorMessage == nil
+        // The old stress test toggled a group with one collapsed child. Exercise
+        // the user's actual disclosure click with 10,000 descendants revealed,
+        // while real newline-delimited engine snapshots arrive in the background.
+        outline.expandItem(disk)
+        var wire = try await model.send("state")
+        guard let prototype = (wire["entries"] as? [[String: Any]])?.first else { throw BridgeError(message: "状态协议自检缺少目录模板。") }
+        wire["folderId"] = root.id
+        wire["tree"] = tree.map { ["id": $0.id, "nodeType": $0.nodeType, "name": $0.name, "parentId": $0.parentId] as [String: Any] }
+        let wireEntries = entries.map { entry -> [String: Any] in
+            var value = prototype
+            value["id"] = entry.id; value["parentId"] = entry.parentId ?? ""; value["diskId"] = entry.diskId
+            value["remoteId"] = entry.remoteId; value["name"] = entry.name
+            value["isDirectory"] = entry.isDirectory; value["isDiskRoot"] = entry.isDiskRoot
+            value["lastListed"] = entry.lastListed as Any? ?? NSNull()
+            return value
+        }
+        let reloadsBefore = outline.fullReloadCount
+        var received = 0, replyReceived = false, preparedIndexUsed = true
+        let reader = EngineOutputReader { message in
+            switch message {
+            case let .state(state, index):
+                test.apply(state, index: index); received += 1
+                preparedIndexUsed = preparedIndexUsed && test.browserIndex.revision == index.revision
+            case .reply: replyReceived = true
+            case .failure(let error): test.errorMessage = error
+            default: break
+            }
+        }
+        let producer = Task.detached {
+            var body = wire, items = wireEntries
+            for index in 0..<8 {
+                items[index + 1]["lastListed"] = stamp
+                body["entries"] = items; body["connectionStatus"] = "目录预加载 \(index)"
+                var frame = try JSONSerialization.data(withJSONObject: ["event": "state", "data": body]); frame.append(10)
+                // Split a line as the OS pipe would; do not assume one read per event.
+                let middle = frame.count / 2
+                reader.append(Data(frame[..<middle])); reader.append(Data(frame[middle...]))
+                try await Task.sleep(nanoseconds: 25_000_000)
+            }
+            reader.append(Data("{\"id\":71,\"result\":{}}\n".utf8))
+        }
+        var maxToggle = 0.0, maxGap = 0.0
+        let deadline = ProcessInfo.processInfo.systemUptime + 12
+        for iteration in 0..<160 {
+            let tick = ProcessInfo.processInfo.systemUptime
+            if iteration < 12 {
+                let cell = outline.frameOfOutlineCell(atRow: 0)
+                try click(outline, at: NSPoint(x: cell.midX, y: cell.midY))
+                maxToggle = max(maxToggle, ProcessInfo.processInfo.systemUptime - tick)
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+            maxGap = max(maxGap, ProcessInfo.processInfo.systemUptime - tick)
+            if iteration >= 12 && replyReceived { break }
+            if ProcessInfo.processInfo.systemUptime >= deadline { break }
+        }
+        try await producer.value
+        try await Task.sleep(nanoseconds: 100_000_000)
+        checks["preload-no-full-tree-reload"] = outline.fullReloadCount == reloadsBefore
+        checks["preload-state-reader-order"] = replyReceived && received > 0 && test.state?.connectionStatus == "目录预加载 7"
+        checks["preload-index-prepared-off-main"] = preparedIndexUsed && received > 0
+        checks["cached-drive-disclosure-responsive"] = maxToggle < 0.5 && maxGap < 0.5
+        checks["preload-drive-expansion-retained"] = outline.isItemExpanded(drive) && outline.isItemExpanded(disk)
+        let metrics: [String: Any] = ["directoryCount": 10_000, "stateEvents": received,
+            "maxCachedDriveToggleMs": maxToggle * 1000, "maxMainLoopGapMs": maxGap * 1000,
+            "fullTreeReloadsDuringPreload": outline.fullReloadCount - reloadsBefore]
+        try JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(
+            to: URL(fileURLWithPath: output).deletingPathExtension().appendingPathExtension("performance.json"))
+        NativeDiagnostics.write("browser performance: \(metrics)")
+        outline.collapseItem(disk)
         func point(_ row: Int) -> NSPoint { NSPoint(x: 65, y: table.rect(ofRow: row).midY) }
         try click(table, at: point(0))
         NativeDiagnostics.write("browser interaction: single click returned")

@@ -2,18 +2,20 @@ import Foundation
 
 @MainActor
 final class EngineBridge {
-    var onState: ((ClientState) -> Void)?
+    var onState: ((ClientState, BrowserIndex) -> Void)?
     var onProgress: ((TransferState) -> Void)?
     var onFailure: ((String) -> Void)?
     private var process: Process?
     private var input: Pipe?
     private var output: Pipe?
     private var errors: Pipe?
-    private var buffer = Data()
+    private var reader: EngineOutputReader?
     private var nextID: Int64 = 0
     private var pending: [Int64: CheckedContinuation<[String: Any], Error>] = [:]
     private(set) var stderr = ""
     private var shuttingDown = false
+    private var outputEnded = false
+    private var exitStatus: Int32?
 
     func start(demo: Bool) throws {
         guard process == nil else { return }
@@ -23,10 +25,16 @@ final class EngineBridge {
         child.executableURL = executable
         child.arguments = demo ? ["--demo"] : []
         child.standardInput = stdin; child.standardOutput = stdout; child.standardError = stderrPipe
+        let reader = EngineOutputReader { [weak self] message in self?.receive(message) }
+        self.reader = reader
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            if data.isEmpty { handle.readabilityHandler = nil; return }
-            Task { @MainActor in self?.receive(data) }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                reader.finish { [weak self] in self?.outputEnded = true; self?.completeTermination() }
+                return
+            }
+            reader.append(data)
         }
         stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -40,15 +48,22 @@ final class EngineBridge {
         child.terminationHandler = { [weak self] child in
             Task { @MainActor in
                 guard let self else { return }
-                let message = "同步引擎已退出（\(child.terminationStatus)）。待办会在下次启动恢复。"
-                for continuation in self.pending.values { continuation.resume(throwing: BridgeError(message: message)) }
-                self.pending.removeAll()
-                if !self.shuttingDown { self.onFailure?(message) }
+                self.exitStatus = child.terminationStatus
+                self.completeTermination()
             }
         }
         input = stdin; output = stdout; errors = stderrPipe; process = child
         try child.run()
         NativeDiagnostics.write("engine launched pid=\(child.processIdentifier)")
+    }
+    private func completeTermination() {
+        // A process can exit before the decoding queue has delivered its last
+        // reply. Drain stdout through EOF before failing remaining requests.
+        guard outputEnded, let exitStatus else { return }
+        let message = "同步引擎已退出（\(exitStatus)）。待办会在下次启动恢复。"
+        for continuation in pending.values { continuation.resume(throwing: BridgeError(message: message)) }
+        pending.removeAll()
+        if !shuttingDown { onFailure?(message) }
     }
     func request(_ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {
         guard let process, process.isRunning, let input else { throw BridgeError(message: "同步引擎尚未启动。") }
@@ -67,23 +82,15 @@ final class EngineBridge {
             catch { pending.removeValue(forKey: id)?.resume(throwing: error) }
         }
     }
-    private func receive(_ data: Data) {
-        guard !data.isEmpty else { return }
-        buffer.append(data)
-        while let newline = buffer.firstIndex(of: 10) {
-            let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
-            do {
-                guard let envelope = try JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
-                if let event = envelope["event"] as? String, let body = envelope["data"] {
-                    let payload = try JSONSerialization.data(withJSONObject: body)
-                    if event == "state" { onState?(try JSONDecoder().decode(ClientState.self, from: payload)) }
-                    if event == "progress" { onProgress?(try JSONDecoder().decode(TransferState.self, from: payload)) }
-                } else if let id = envelope["id"] as? NSNumber, let continuation = pending.removeValue(forKey: id.int64Value) {
-                    if let error = envelope["error"] as? [String: Any] {
-                        continuation.resume(throwing: BridgeError(message: error["message"] as? String ?? "操作未完成。"))
-                    } else { continuation.resume(returning: envelope["result"] as? [String: Any] ?? [:]) }
-                }
-            } catch { onFailure?("无法读取同步状态：\(error.localizedDescription)") }
+    private func receive(_ message: EngineOutput) {
+        switch message {
+        case let .state(state, index): onState?(state, index)
+        case let .progress(progress): onProgress?(progress)
+        case let .failure(message): onFailure?(message)
+        case let .reply(id, result, error):
+            guard let continuation = pending.removeValue(forKey: id) else { return }
+            if let error { continuation.resume(throwing: BridgeError(message: error)) }
+            else { continuation.resume(returning: result) }
         }
     }
     @discardableResult func shutdown() async -> Bool {

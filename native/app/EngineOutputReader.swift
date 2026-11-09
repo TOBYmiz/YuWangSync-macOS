@@ -14,6 +14,7 @@ final class EngineOutputReader {
     private var buffer = Data()
     private var pendingState: ClientState?
     private var pendingProgress: TransferState?
+    private var lastWasState = false
     private var scheduled = false
     private let deliver: @MainActor (EngineOutput) -> Void
 
@@ -26,8 +27,8 @@ final class EngineOutputReader {
                 let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
                 do {
                     let event = try JSONDecoder().decode(Envelope.self, from: line)
-                    if let state = event.state { pendingState = state }
-                    else if let progress = event.progress { pendingProgress = progress }
+                    if let state = event.state { pendingState = state; lastWasState = true }
+                    else if let progress = event.progress { pendingProgress = progress; lastWasState = false }
                     else if let id = event.id,
                             let reply = try JSONSerialization.jsonObject(with: line) as? [String: Any] {
                         flush()
@@ -55,8 +56,13 @@ final class EngineOutputReader {
     }
 
     private func flush() {
+        // Preserve the last state/progress ordering: a completed-operation state
+        // must clear earlier progress rather than be followed by stale progress.
+        let progress = pendingProgress
+        pendingProgress = nil
+        if lastWasState, let progress { emit(.progress(progress)) }
         if let state = pendingState { pendingState = nil; emit(.state(state, BrowserIndex(state))) }
-        if let progress = pendingProgress { pendingProgress = nil; emit(.progress(progress)) }
+        if !lastWasState, let progress { emit(.progress(progress)) }
     }
 
     private func emit(_ message: EngineOutput) {

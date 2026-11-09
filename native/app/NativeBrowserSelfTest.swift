@@ -132,28 +132,35 @@ enum NativeBrowserSelfTest {
         }
         let reloadsBefore = outline.fullReloadCount
         var received = 0, replyReceived = false, preparedIndexUsed = true
+        var outputOrder: [String] = []
         let reader = EngineOutputReader { message in
             switch message {
             case let .state(state, index):
+                outputOrder.append("state")
                 test.apply(state, index: index); received += 1
                 preparedIndexUsed = preparedIndexUsed && test.browserIndex.revision == index.revision
-            case .reply: replyReceived = true
+            case .reply: outputOrder.append("reply"); replyReceived = true
+            case .progress: outputOrder.append("progress")
             case .failure(let error): test.errorMessage = error
             default: break
             }
         }
         let producer = Task.detached {
-            var body = wire, items = wireEntries
+            var body = wire, items = wireEntries, finalFrame = Data()
             for index in 0..<8 {
                 items[index + 1]["lastListed"] = stamp
                 body["entries"] = items; body["connectionStatus"] = "目录预加载 \(index)"
                 var frame = try JSONSerialization.data(withJSONObject: ["event": "state", "data": body]); frame.append(10)
+                finalFrame = frame
                 // Split a line as the OS pipe would; do not assume one read per event.
                 let middle = frame.count / 2
                 reader.append(Data(frame[..<middle])); reader.append(Data(frame[middle...]))
                 try await Task.sleep(nanoseconds: 25_000_000)
             }
-            reader.append(Data("{\"id\":71,\"result\":{}}\n".utf8))
+            var tail = Data("{\"event\":\"progress\",\"data\":{\"name\":\"selftest\",\"stage\":\"done\",\"completed\":1,\"total\":1,\"percent\":100}}\n".utf8)
+            tail.append(finalFrame)
+            tail.append(Data("{\"id\":71,\"result\":{}}\n".utf8))
+            reader.append(tail)
         }
         var maxToggle = 0.0, maxGap = 0.0
         let deadline = ProcessInfo.processInfo.systemUptime + 12
@@ -174,6 +181,7 @@ enum NativeBrowserSelfTest {
         checks["preload-no-full-tree-reload"] = outline.fullReloadCount == reloadsBefore
         checks["preload-state-reader-order"] = replyReceived && received > 0 && test.state?.connectionStatus == "目录预加载 7"
         checks["preload-index-prepared-off-main"] = preparedIndexUsed && received > 0
+        checks["state-progress-wire-order"] = Array(outputOrder.suffix(3)) == ["progress", "state", "reply"]
         checks["cached-drive-disclosure-responsive"] = maxToggle < 0.5 && maxGap < 0.5
         checks["preload-drive-expansion-retained"] = outline.isItemExpanded(drive) && outline.isItemExpanded(disk)
         let metrics: [String: Any] = ["directoryCount": 10_000, "stateEvents": received,

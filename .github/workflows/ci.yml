@@ -57,6 +57,8 @@ jobs:
           MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
         run: bash tools/prepare-macos-signing.sh
       - name: Build self-contained application
+        env:
+          YUWANG_DMG_PREVIEW: '1'
         run: bash tools/package-macos.sh
       - name: Prepare signed Keychain upgrade fixture
         run: python3 tools/verify-keychain-signing.py prepare

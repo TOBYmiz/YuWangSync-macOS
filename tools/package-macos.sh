@@ -62,17 +62,36 @@ cat > "$image_root/安装说明.txt" <<'INSTALL'
 将 YuWangSync.app 拖入 Applications 即可安装。
 适用 macOS 14+、Apple Silicon。应用自带运行时。
 此版本为预览版，尚未完成 Developer ID 签名与 Apple 公证。
+
+更新前请通过 ⌘Q 或菜单栏“退出育网云”完全退出应用，再替换 Applications 中的旧版本。
+关闭主窗口不会退出后台进程。
 INSTALL
+xcrun swiftc -swift-version 5 -O -target arm64-apple-macos14.0 \
+  "$root/tools/dmg-artwork.swift" -o "$work/dmg-artwork"
+"$work/dmg-artwork" render "$image_root"
+python3 -m venv "$work/dmg-tools"
+dmg_python="$work/dmg-tools/bin/python3"
+"$dmg_python" -m pip --disable-pip-version-check install --require-hashes -r "$root/tools/requirements-dmg.txt"
 dmg="$root/artifacts/YuWangSync-macOS-arm64-preview.dmg"
-hdiutil create -ov -volname "育网云" -srcfolder "$image_root" -format UDZO -fs HFS+ "$dmg"
-hdiutil verify "$dmg"
 mount="$work/dmg-mount"
 mkdir -p "$mount"
+hdiutil create -ov -volname "育网云" -srcfolder "$image_root" -format UDRW -fs HFS+ "$work/layout.dmg"
+hdiutil attach -nobrowse -mountpoint "$mount" "$work/layout.dmg"
+trap 'hdiutil detach "$mount" >/dev/null 2>&1 || true' EXIT
+"$dmg_python" "$root/tools/dmg-layout.py" write "$mount"
+hdiutil detach "$mount"
+trap - EXIT
+hdiutil convert "$work/layout.dmg" -ov -format UDZO -o "$dmg"
+hdiutil verify "$dmg"
 hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg"
 trap 'hdiutil detach "$mount" >/dev/null 2>&1 || true' EXIT
 codesign --verify --deep --strict "$mount/YuWangSync.app"
 test "$(readlink "$mount/Applications")" = /Applications
 diff -qr "$app" "$mount/YuWangSync.app"
+"$dmg_python" "$root/tools/dmg-layout.py" verify "$mount"
+if [[ "${YUWANG_DMG_PREVIEW:-0}" == 1 ]]; then
+  "$work/dmg-artwork" capture "$mount" "$root/artifacts/ui-dmg-macos.png"
+fi
 hdiutil detach "$mount"
 trap - EXIT
 (cd "$root/artifacts" && shasum -a 256 YuWangSync-macOS-arm64-preview.dmg > YuWangSync-macOS-arm64-preview.dmg.sha256)

@@ -83,9 +83,15 @@ func capture(mount: String, output: String) throws {
             Thread.sleep(forTimeInterval: 1)
             let inspect = Process()
             inspect.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            inspect.arguments = ["-e", "tell application \"Finder\" to get properties of icon view options of front Finder window"]
+            inspect.arguments = ["-e", "tell application \"Finder\" to get icon size of icon view options of front Finder window"]
+            let iconSize = Pipe()
+            inspect.standardOutput = iconSize
             try inspect.run()
             inspect.waitUntilExit()
+            let actualSize = String(data: iconSize.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard inspect.terminationStatus == 0 && actualSize == "96" else {
+                throw NSError(domain: "DMGPreview", code: 4, userInfo: [NSLocalizedDescriptionKey: "Finder did not apply the saved icon size"])
+            }
             let screenshot = Process()
             screenshot.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
             screenshot.arguments = ["-x", "-l", String(number), output]

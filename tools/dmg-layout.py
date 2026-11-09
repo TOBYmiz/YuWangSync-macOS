@@ -14,7 +14,8 @@ POSITIONS = {
     "Applications": (520, 180),
     "安装说明.txt": (340, 286),
 }
-BOUNDS = "{{100, 100}, {680, 450}}"
+# Finder's saved height includes its title bar; the background is 450 pt high.
+BOUNDS = "{{100, 100}, {680, 480}}"
 
 
 def write_layout(mount):

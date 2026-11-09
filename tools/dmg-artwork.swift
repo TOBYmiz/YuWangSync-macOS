@@ -8,13 +8,13 @@ func bitmap(size: NSSize, scale: Int, draw: () -> Void) -> NSBitmapImageRep {
                               pixelsHigh: Int(size.height) * scale, bitsPerSample: 8,
                               samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
-    rep.size = size
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     NSGraphicsContext.current!.cgContext.clear(CGRect(x: 0, y: 0, width: rep.pixelsWide, height: rep.pixelsHigh))
     NSGraphicsContext.current!.cgContext.scaleBy(x: CGFloat(scale), y: CGFloat(scale))
     draw()
     NSGraphicsContext.restoreGraphicsState()
+    rep.size = size
     return rep
 }
 
@@ -68,17 +68,17 @@ func artwork(mount: String) throws {
 
 func capture(mount: String, output: String) throws {
     // Capture the mounted final image's Finder window, rather than a mockup.
-    let script = Process()
-    script.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    script.arguments = ["-e", "on run argv\ntell application \"Finder\"\nopen (POSIX file (item 1 of argv))\nactivate\nend tell\nend run", mount]
-    try script.run()
-    script.waitUntilExit()
-    guard script.terminationStatus == 0 else { throw NSError(domain: "DMGPreview", code: 1) }
+    let open = Process()
+    open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    open.arguments = ["-a", "Finder", mount]
+    try open.run()
+    open.waitUntilExit()
+    guard open.terminationStatus == 0 else { throw NSError(domain: "DMGPreview", code: 1) }
     for _ in 0..<30 {
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         if let window = windows.first(where: {
             ($0[kCGWindowOwnerName as String] as? String) == "Finder" &&
-            ($0[kCGWindowName as String] as? String) == "育网云"
+            ["育网云", URL(fileURLWithPath: mount).lastPathComponent].contains($0[kCGWindowName as String] as? String ?? "")
         }), let number = window[kCGWindowNumber as String] as? Int {
             Thread.sleep(forTimeInterval: 1)
             let screenshot = Process()

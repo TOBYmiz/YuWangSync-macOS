@@ -164,7 +164,8 @@ enum NativeBrowserSelfTest {
         }
         var maxToggle = 0.0, maxGap = 0.0
         let deadline = ProcessInfo.processInfo.systemUptime + 12
-        for iteration in 0..<160 {
+        var iteration = 0
+        while ProcessInfo.processInfo.systemUptime < deadline {
             let tick = ProcessInfo.processInfo.systemUptime
             if iteration < 12 {
                 let cell = outline.frameOfOutlineCell(atRow: 0)
@@ -174,7 +175,7 @@ enum NativeBrowserSelfTest {
             try await Task.sleep(nanoseconds: 10_000_000)
             maxGap = max(maxGap, ProcessInfo.processInfo.systemUptime - tick)
             if iteration >= 12 && replyReceived { break }
-            if ProcessInfo.processInfo.systemUptime >= deadline { break }
+            iteration += 1
         }
         try await producer.value
         try await Task.sleep(nanoseconds: 100_000_000)

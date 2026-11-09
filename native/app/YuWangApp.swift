@@ -438,7 +438,7 @@ enum NativeSelfTest {
         } catch let failure { error = failure.localizedDescription + "\n" + model.bridge.stderr }
         NativeDiagnostics.write("self-test requesting engine shutdown")
         checks["engine-shutdown"] = await AppDelegate.shared?.prepareForTermination() == true
-        let passed = checks.count == 38 && checks.values.allSatisfy { $0 } && error.isEmpty
+        let passed = checks.count == 43 && checks.values.allSatisfy { $0 } && error.isEmpty
         do {
             let output = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: ["passed": passed, "nativeControls": true, "checks": checks, "windowChrome": chrome, "error": error], options: [.prettyPrinted, .sortedKeys])

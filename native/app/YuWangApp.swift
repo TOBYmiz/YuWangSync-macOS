@@ -163,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         return confirmed
     }
     func updateStatus() {
-        let text = "\(model.pendingCount) 项任务 · \(model.errorCount) 项需处理"
+        let text = (model.state?.paused == true ? "同步已暂停 · " : "") + model.taskSummary
         statusLine?.title = text; statusItem?.button?.toolTip = "育网云 · " + text
         // The sidebar picker shows the account; keep the native title on one centered line.
         mainWindow?.title = model.currentFolder?.name ?? "育网云"

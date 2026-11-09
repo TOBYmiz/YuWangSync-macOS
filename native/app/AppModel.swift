@@ -46,6 +46,10 @@ final class AppModel: ObservableObject {
     var selectedOperation: CloudOperation? { state?.operations.first { $0.id == taskSelection } }
     var pendingCount: Int { state?.operations.filter { !$0.isTerminal }.count ?? 0 }
     var errorCount: Int { state?.operations.filter { ["blocked", "failed", "uncertain"].contains($0.state) }.count ?? 0 }
+    var taskSummary: String {
+        if pendingCount == 0 { return "没有待办任务" }
+        return errorCount > 0 ? "\(pendingCount) 项任务 · \(errorCount) 项需处理" : "\(pendingCount) 项任务"
+    }
 
     init(preferences: UserDefaults? = nil) {
         // Demo and CI must never read or change the user's saved sidebar.
@@ -156,14 +160,16 @@ final class AppModel: ObservableObject {
         perform {
             let result = try await self.send("download", ["ids": ids])
             let errors = result["errors"] as? [String] ?? []
-            self.message = errors.isEmpty ? "已下载，可离线使用。云端后续更新不会自动下载。" : "部分下载未完成：" + errors.prefix(5).joined(separator: "；")
+            self.message = errors.isEmpty ? "已下载 \(ids.count) 项，可离线使用；云端之后的更新不会自动同步。" : "\(errors.count) 项下载未完成：" + errors.prefix(3).joined(separator: "；")
         }
     }
     func chooseUpload(folders: Bool) {
         guard state?.folderId != nil else { return }
         perform {
             let panel = NSOpenPanel(); panel.canChooseDirectories = folders; panel.canChooseFiles = !folders; panel.allowsMultipleSelection = true
-            panel.prompt = "上传"; panel.message = folders ? "同名目录会合并，同名文件将逐项确认。" : "选择要上传到当前目录的文件。"
+            panel.prompt = "上传"
+            let target = self.currentFolder.map { "“\($0.name)”" } ?? "当前文件夹"
+            panel.message = folders ? "上传到\(target)。同名文件夹会合并，同名文件会逐项询问处理方式。" : "选择要上传到\(target)的文件。"
             if await self.present(panel) == .OK { try await self.importPaths(panel.urls.map(\.path)) }
         }
     }
@@ -175,31 +181,31 @@ final class AppModel: ObservableObject {
         let current = try JSONDecoder().decode(ClientState.self, from: JSONSerialization.data(withJSONObject: snapshot))
         state = current; collisionIDs = current.operations.filter { ids.contains($0.id) && $0.state == "blocked" }.map(\.id)
         showTasks = true; showCollisions = !collisionIDs.isEmpty
-        message = "已加入 \(ids.count) 个文件，内容已保存到本地待办。"
+        message = ids.isEmpty ? "没有需要上传的文件。" : "已加入 \(ids.count) 项上传任务，文件快照已保存到本地。"
     }
     func exportSelected() {
         guard let entry = selectedEntries.first else { return }
         perform {
             let panel = NSSavePanel(); panel.nameFieldStringValue = entry.name; panel.prompt = "导出"
-            panel.message = "导出的副本独立保存，修改不会自动上传。"
+            panel.message = "导出的是独立副本，之后的修改不会自动上传。"
             if await self.present(panel) == .OK, let url = panel.url {
                 _ = try await self.send("export", ["entryId": entry.id, "destination": url.path, "overwrite": !entry.isDirectory])
-                self.message = "已导出独立副本。"
+                self.message = "已导出“\(entry.name)”。"
             }
         }
     }
     func newFolder() {
         guard let parent = state?.folderId else { return }
-        perform { if let name = await self.prompt("新建文件夹", value: "新建文件夹") { _ = try await self.send("createFolder", ["parentId": parent, "name": name]); self.showTasks = true } }
+        perform { if let name = await self.prompt("新建文件夹", value: "新建文件夹", detail: "在“\(self.currentFolder?.name ?? "当前文件夹")”中创建。") { _ = try await self.send("createFolder", ["parentId": parent, "name": name]); self.showTasks = true } }
     }
     func renameSelected() {
         guard let entry = selectedEntries.first else { return }
-        perform { if let name = await self.prompt("重命名", value: entry.name) { _ = try await self.send("rename", ["entryId": entry.id, "name": name]); self.showTasks = true } }
+        perform { if let name = await self.prompt("重命名“\(entry.name)”", value: entry.name) { _ = try await self.send("rename", ["entryId": entry.id, "name": name]); self.showTasks = true } }
     }
     func deleteSelected() {
         let ids = Array(selection); guard !ids.isEmpty else { return }
         perform {
-            if await self.confirm("将 \(ids.count) 项移到云端回收站？", detail: "离线时会排队。重连后重新检查权限和云端变化。", button: "移到回收站") {
+            if await self.confirm(ids.count == 1 ? "将“\(self.selectedEntries.first?.name ?? "所选项目")”移到云端回收站？" : "将 \(ids.count) 项移到云端回收站？", detail: "离线时会排队，重新连接后会再次检查权限和云端变化。", button: "移到回收站") {
                 _ = try await self.send("delete", ["ids": ids]); self.showTasks = true
             }
         }
@@ -209,7 +215,7 @@ final class AppModel: ObservableObject {
     func retryTask() { guard let op = selectedOperation else { return }; perform { _ = try await self.send("retry", ["operationId": op.id]) } }
     func cancelTask() {
         guard let op = selectedOperation else { return }
-        perform { if await self.confirm("取消这项任务？", detail: "未发送的依赖任务将一起取消。已发送请求会保留记录以核对结果，本地修改不会删除。", button: "取消任务") { _ = try await self.send("cancel", ["operationId": op.id]) } }
+        perform { if await self.confirm("取消任务“\(op.name)”？", detail: "依赖它的未发送任务会一并取消。已发送的请求会保留记录以便核对结果，本地修改不会被删除。", button: "取消任务") { _ = try await self.send("cancel", ["operationId": op.id]) } }
     }
     func verifyTaskNow() {
         guard let op = selectedOperation, op.state == "awaitingVerification" else { return }
@@ -218,7 +224,7 @@ final class AppModel: ObservableObject {
     func overwriteTask() {
         guard let op = selectedOperation else { return }
         perform {
-            if await self.confirm("使用当前云端版本继续？", detail: "先重新核对云端。上传将覆盖当前版本；删除或移动目录将接受当前目录内容。", button: "核对并继续") {
+            if await self.confirm("按当前云端状态继续“\(op.name)”？", detail: "会先重新核对云端。上传将覆盖云端当前版本；删除或移动文件夹将以云端当前内容为准。", button: "核对并继续") {
                 _ = try await self.send("resolve", ["operationId": op.id, "choice": "replace"])
             }
         }
@@ -235,7 +241,10 @@ final class AppModel: ObservableObject {
         guard let op = selectedOperation else { return }
         perform {
             let panel = NSSavePanel(); panel.nameFieldStringValue = op.name; panel.prompt = "导出"
-            if await self.present(panel) == .OK, let url = panel.url { _ = try await self.send("exportTask", ["operationId": op.id, "destination": url.path, "overwrite": true]) }
+            if await self.present(panel) == .OK, let url = panel.url {
+                _ = try await self.send("exportTask", ["operationId": op.id, "destination": url.path, "overwrite": true])
+                self.message = "已导出“\(op.name)”的待传内容。"
+            }
         }
     }
     func linkFolderTask() {

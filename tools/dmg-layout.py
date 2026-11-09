@@ -34,6 +34,9 @@ def write_layout(mount):
         store["."]["icvp"] = {
             "viewOptionsVersion": 1,
             "backgroundType": 2,
+            "backgroundColorRed": 1.0,
+            "backgroundColorGreen": 1.0,
+            "backgroundColorBlue": 1.0,
             "backgroundImageAlias": Alias.for_file(str(mount / ".background.tiff")).to_bytes(),
             "gridOffsetX": 0.0,
             "gridOffsetY": 0.0,

@@ -81,6 +81,11 @@ func capture(mount: String, output: String) throws {
             ["育网云", URL(fileURLWithPath: mount).lastPathComponent].contains($0[kCGWindowName as String] as? String ?? "")
         }), let number = window[kCGWindowNumber as String] as? Int {
             Thread.sleep(forTimeInterval: 1)
+            let inspect = Process()
+            inspect.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            inspect.arguments = ["-e", "tell application \"Finder\" to get properties of icon view options of front Finder window"]
+            try inspect.run()
+            inspect.waitUntilExit()
             let screenshot = Process()
             screenshot.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
             screenshot.arguments = ["-x", "-l", String(number), output]

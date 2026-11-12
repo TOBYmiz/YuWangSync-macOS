@@ -152,4 +152,22 @@ public sealed class InteractionTests
         }
         finally { Directory.Delete(root, true); }
     }
+
+    [Fact]
+    public async Task Browse_reply_leaves_state_to_the_state_event()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YuWangSync-browse-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var engine = new EngineHost(new LocalFiles(root, Path.Combine(root, "cache")), true);
+            await engine.InitializeAsync();
+            var before = JsonSerializer.SerializeToElement(engine.State(), EngineHost.Json);
+            var folder = before.GetProperty("entries").EnumerateArray().Single(e => e.GetProperty("name").GetString() == "资料").GetProperty("id").GetGuid();
+            var reply = JsonSerializer.SerializeToElement(await engine.DispatchAsync("browse", JsonSerializer.SerializeToElement(new { folderId = folder })), EngineHost.Json);
+            // Navigation replies stay small; a full snapshot here doubled client-side parsing.
+            Assert.False(reply.TryGetProperty("entries", out _));
+            Assert.Equal(folder, JsonSerializer.SerializeToElement(engine.State(), EngineHost.Json).GetProperty("folderId").GetGuid());
+        }
+        finally { Directory.Delete(root, true); }
+    }
 }

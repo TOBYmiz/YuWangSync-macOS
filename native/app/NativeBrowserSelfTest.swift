@@ -217,6 +217,23 @@ enum NativeBrowserSelfTest {
         for index in 0..<20 { try click(table, at: point(index % 5)) }
         NativeDiagnostics.write("browser interaction: repeated clicks finished")
         checks["rapid-file-selection-responsive"] = test.selection.count == 1 && ProcessInfo.processInfo.systemUptime - repeatStart < 5
+        // Clicking a folder must keep the new highlight when mouse tracking ends; it
+        // previously re-applied the old selection until the navigation task started.
+        outline.expandItem(disk)
+        let target = "interaction-folder-0"
+        let targetRow = (0..<outline.numberOfRows).first { (outline.item(atRow: $0) as? DirectoryItem)?.value.id == target } ?? -1
+        var keptHighlight = false
+        if targetRow >= 0 {
+            let rect = outline.rect(ofRow: targetRow)
+            try click(outline, at: NSPoint(x: rect.maxX - 20, y: rect.midY))
+            keptHighlight = outline.selectedRow == targetRow && test.sidebarSelection == target
+        }
+        checks["sidebar-click-keeps-highlight"] = keptHighlight
+        // The isolated model has no engine, so navigation fails and must restore the shown folder.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        checks["sidebar-failed-navigation-restores"] = test.sidebarSelection == root.id && test.errorMessage != nil
+            && (outline.item(atRow: outline.selectedRow) as? DirectoryItem)?.value.id == root.id
+        test.errorMessage = nil
         outline.collapseItem(nil, collapseChildren: true)
         let image = URL(fileURLWithPath: output).deletingPathExtension().path + "-interaction.png"
         try NativeSelfTest.capture(window, to: URL(fileURLWithPath: image))

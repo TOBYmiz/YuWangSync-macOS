@@ -36,6 +36,7 @@ final class AppModel: ObservableObject {
     private var reportedNetworkCost: String?
     private var back: [String] = [], forward: [String] = []
     private var statusUpdateScheduled = false
+    private var navigationTarget: String?
     var isSelfTest: Bool { CommandLine.arguments.contains("--ui-selftest") }
     var isDemo: Bool { isSelfTest || CommandLine.arguments.contains("--demo") }
     var currentFolder: CloudEntry? { guard let id = state?.folderId else { return nil }; return browserIndex.entries[id] }
@@ -106,7 +107,12 @@ final class AppModel: ObservableObject {
             self.reportNetworkCost()
             if let operation = self.transfer?.operationId, !state.operations.contains(where: { $0.id == operation && $0.state == "running" }) { self.transfer = nil }
             NativeDiagnostics.write("state received entries=\(state.entries.count) operations=\(state.operations.count)")
-            if previous != state.folderId { self.sidebarSelection = state.folderId; self.selection.removeAll() }
+            if previous != state.folderId {
+                // A snapshot for an earlier folder must not pull the highlight back
+                // while a newer navigation is still in flight.
+                if self.navigationTarget == nil || self.navigationTarget == state.folderId { self.sidebarSelection = state.folderId }
+                self.selection.removeAll()
+            }
             let valid = self.selection.intersection(Set(self.fileRows.map(\.id)))
             if valid != self.selection { self.selection = valid }
             self.scheduleStatusUpdate()
@@ -147,9 +153,19 @@ final class AppModel: ObservableObject {
     func navigate(_ id: String, history: Bool = true) async throws {
         sidebarRevealID = id; sidebarRevealRevision += 1
         sidebarSelection = id
-        if state?.folderId == id { return }
-        if history, let current = state?.folderId { back.append(current); forward.removeAll() }
-        filter = ""; selection.removeAll(); _ = try await send("browse", ["folderId": id])
+        // Returning to the shown folder while another browse is in flight must still
+        // reach the engine, which already switched to the pending target.
+        if state?.folderId == id && (navigationTarget == nil || navigationTarget == id) { return }
+        if history, let current = state?.folderId, current != id { back.append(current); forward.removeAll() }
+        filter = ""; selection.removeAll()
+        navigationTarget = id
+        do {
+            _ = try await send("browse", ["folderId": id])
+            if navigationTarget == id { navigationTarget = nil }
+        } catch {
+            if navigationTarget == id { navigationTarget = nil; sidebarSelection = state?.folderId }
+            throw error
+        }
     }
     func goBack() { guard let id = back.popLast() else { return }; if let current = state?.folderId { forward.append(current) }; perform { try await self.navigate(id, history: false) } }
     func goForward() { guard let id = forward.popLast() else { return }; if let current = state?.folderId { back.append(current) }; perform { try await self.navigate(id, history: false) } }

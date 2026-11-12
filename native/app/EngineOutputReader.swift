@@ -14,6 +14,7 @@ final class EngineOutputReader {
     private var buffer = Data()
     private var pendingState: ClientState?
     private var pendingProgress: TransferState?
+    private var lastIndex: BrowserIndex?
     private var lastWasState = false
     private var scheduled = false
     private let deliver: @MainActor (EngineOutput) -> Void
@@ -61,7 +62,15 @@ final class EngineOutputReader {
         let progress = pendingProgress
         pendingProgress = nil
         if lastWasState, let progress { emit(.progress(progress)) }
-        if let state = pendingState { pendingState = nil; emit(.state(state, BrowserIndex(state))) }
+        if let state = pendingState {
+            pendingState = nil
+            var index = BrowserIndex(state)
+            if let previous = lastIndex {
+                index.changes = DirectoryChanges(base: previous.revision, from: previous.directories, to: index.directories)
+            }
+            lastIndex = index
+            emit(.state(state, index))
+        }
         if !lastWasState, let progress { emit(.progress(progress)) }
     }
 

@@ -28,9 +28,39 @@ struct DirectorySnapshot: Equatable {
     }
 }
 
+// Differences between consecutive directory snapshots. The engine reader computes
+// this off the main thread so a state event costs the outline O(changes), not O(tree).
+struct DirectoryChanges {
+    var base: UUID?
+    var updated: [String] = []       // rows whose stored value changed
+    var redraw: [String] = []        // rows whose title, symbol or expandability changed
+    var removed: [String] = []
+    var branches = Set<String>()     // parents whose child list changed
+    var topBranches: [String] = []   // changed branches without a changed ancestor
+    var rootsChanged = false
+
+    init(base: UUID? = nil, from previous: DirectorySnapshot, to next: DirectorySnapshot) {
+        self.base = base
+        for (id, row) in next.rows {
+            let old = previous.rows[id]
+            guard old != row else { continue }
+            updated.append(id)
+            if old?.title != row.title || old?.symbol != row.symbol || previous.canExpand(id) != next.canExpand(id) { redraw.append(id) }
+        }
+        removed = previous.rows.keys.filter { next.rows[$0] == nil }
+        rootsChanged = previous.roots != next.roots
+        var changed = Set<String>()
+        for id in Set(previous.children.keys).union(next.children.keys)
+            where previous.children[id] != next.children[id] && next.rows[id] != nil { changed.insert(id) }
+        branches = changed
+        topBranches = changed.filter { id in !next.ancestors(of: id).contains(where: changed.contains) }.sorted()
+    }
+}
+
 // Build adjacency lists once per engine snapshot. Never scan all entries per tree node.
 struct BrowserIndex {
     let revision = UUID()
+    var changes: DirectoryChanges?
     var entries: [String: CloudEntry] = [:]
     var filesByParent: [String: [CloudEntry]] = [:]
     var directories = DirectorySnapshot()

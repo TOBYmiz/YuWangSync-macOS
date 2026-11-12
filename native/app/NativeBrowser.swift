@@ -73,35 +73,31 @@ struct NativeDirectoryTree: NSViewRepresentable {
                 outline.collapseItem(nil, collapseChildren: true)
             }
             if indexRevision != model.browserIndex.revision {
+                let next = model.browserIndex.directories
+                // Use the reader's precomputed diff only when it is relative to what
+                // this outline last applied; otherwise diff here.
+                let changes = model.browserIndex.changes.flatMap { $0.base != nil && $0.base == indexRevision ? $0 : nil }
+                    ?? DirectoryChanges(from: snapshot, to: next)
                 indexRevision = model.browserIndex.revision
-                let previous = snapshot, next = model.browserIndex.directories
                 snapshot = next
-                var changedRows: [String] = []
-                for (id, row) in next.rows where previous.rows[id] != row {
+                for id in changes.updated {
+                    guard let row = next.rows[id] else { continue }
                     let item = items[id] ?? DirectoryItem(row); item.value = row; items[id] = item
-                    if previous.rows[id]?.title != row.title || previous.rows[id]?.symbol != row.symbol
-                        || previous.canExpand(id) != next.canExpand(id) { changedRows.append(id) }
                 }
-                let removed = previous.rows.keys.filter { next.rows[$0] == nil }
-                for id in removed { items.removeValue(forKey: id); expanded.remove(id) }
-                if changedAccount || previous.roots != next.roots {
+                for id in changes.removed { items.removeValue(forKey: id); expanded.remove(id) }
+                if changedAccount || changes.rootsChanged {
                     outline.reloadData()
                     restoreExpanded(next.roots)
                 } else {
-                    let changedParents = Set(previous.children.keys).union(next.children.keys).filter {
-                        previous.children[$0] != next.children[$0] && next.rows[$0] != nil
-                    }
                     // Reload only changed branches. A LastListed/metadata update must
                     // not reload the entire tree and replay every expansion.
-                    let branches = Set(changedParents)
-                    let top = branches.filter { id in !next.ancestors(of: id).contains(where: branches.contains) }
-                    for id in top {
+                    for id in changes.topBranches {
                         guard let item = items[id] else { continue }
                         let open = outline.isItemExpanded(item)
                         outline.reloadItem(item, reloadChildren: open)
                         if open { restoreExpanded([id]) }
                     }
-                    for id in changedRows where !branches.contains(id) {
+                    for id in changes.redraw where !changes.branches.contains(id) {
                         if let item = items[id], outline.row(forItem: item) >= 0 {
                             outline.reloadItem(item, reloadChildren: false)
                         }
@@ -156,6 +152,9 @@ struct NativeDirectoryTree: NSViewRepresentable {
         func outlineViewSelectionDidChange(_ notification: Notification) {
             guard !applying, !changingExpansion, let outline, outline.selectedRow >= 0,
                   let id = (outline.item(atRow: outline.selectedRow) as? DirectoryItem)?.value.entryID else { return }
+            // Record the target before mouse tracking ends: trackingFinished re-applies
+            // model.sidebarSelection and would otherwise flash the previous row back.
+            model.sidebarSelection = id
             model.perform { try await self.model.navigate(id) }
         }
         private func expansionStarted() {

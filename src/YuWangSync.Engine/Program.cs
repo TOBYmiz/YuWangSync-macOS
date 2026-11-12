@@ -210,18 +210,23 @@ public sealed class EngineHost : IAsyncDisposable
                 }
                 finally { _loginGate.Release(); }
             case "cancelLogin": _loginStop?.Cancel(); return new { };
+            // Navigation replies carry no state: the state event sent after every
+            // request already does, and a second full snapshot doubles client parsing.
             case "browse":
                 var folder = Id(p, "folderId"); lock (_stateLock) _folder = folder;
+                // Show cached children immediately; a stale-listing refresh or a
+                // directory lock held by preload must not delay the switch.
+                if (_workspace.Store.GetEntry(folder)?.LastListed is not null) await SendStateSafelyAsync();
                 await _workspace.BrowseAsync(folder, Flag(p, "force"), _done.Token, probeSizes: false);
-                ProbeSizesInBackground(folder); return State();
+                ProbeSizesInBackground(folder); return new { };
             case "loadFolder":
-                await _workspace.BrowseAsync(Id(p, "folderId"), ct: _done.Token, probeSizes: false); return State();
+                await _workspace.BrowseAsync(Id(p, "folderId"), ct: _done.Token, probeSizes: false); return new { };
             case "refresh":
                 if (_workspace.Offline && !_workspace.ManualOffline) await _workspace.ReconnectAsync(_done.Token);
                 Guid? current; lock (_stateLock) current = _folder;
                 if (current is { } root) { await _workspace.BrowseAsync(root, true, _done.Token, probeSizes: false); ProbeSizesInBackground(root); }
                 else await _workspace.RefreshTreeAsync(_done.Token);
-                return State();
+                return new { };
             case "open":
                 using (var foreground = _workspace.BeginForegroundTransfer()) return new { path = await _workspace.OpenAsync(Id(p, "entryId"), BeginTransfer()) };
             case "download":

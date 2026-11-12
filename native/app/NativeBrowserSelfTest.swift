@@ -220,6 +220,8 @@ enum NativeBrowserSelfTest {
         // Clicking a folder must keep the new highlight when mouse tracking ends; it
         // previously re-applied the old selection until the navigation task started.
         outline.expandItem(disk)
+        // A programmatic expansion suppresses selection changes until the next main-loop turn.
+        try await Task.sleep(nanoseconds: 100_000_000)
         let target = "interaction-folder-0"
         let targetRow = (0..<outline.numberOfRows).first { (outline.item(atRow: $0) as? DirectoryItem)?.value.id == target } ?? -1
         var keptHighlight = false
@@ -228,9 +230,11 @@ enum NativeBrowserSelfTest {
             try click(outline, at: NSPoint(x: rect.maxX - 20, y: rect.midY))
             keptHighlight = outline.selectedRow == targetRow && test.sidebarSelection == target
         }
+        NativeDiagnostics.write("browser interaction: sidebar click row=\(targetRow) selected=\(outline.selectedRow) model=\(test.sidebarSelection ?? "nil")")
         checks["sidebar-click-keeps-highlight"] = keptHighlight
         // The isolated model has no engine, so navigation fails and must restore the shown folder.
         try await Task.sleep(nanoseconds: 150_000_000)
+        NativeDiagnostics.write("browser interaction: failed navigation model=\(test.sidebarSelection ?? "nil") selected=\(outline.selectedRow) error=\(test.errorMessage ?? "nil")")
         checks["sidebar-failed-navigation-restores"] = test.sidebarSelection == root.id && test.errorMessage != nil
             && (outline.item(atRow: outline.selectedRow) as? DirectoryItem)?.value.id == root.id
         test.errorMessage = nil

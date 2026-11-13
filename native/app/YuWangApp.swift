@@ -363,9 +363,12 @@ enum NativeSelfTest {
             checks["favorites-default-expanded"] = preferences.favoritesExpanded && preferences.visibleFavorites.isEmpty
             preferences.toggleFavorite(favoriteTarget)
             let favorite = preferences.visibleFavorites.first!
+            checks["favorites-height-default"] = preferences.favoritesHeight == AppModel.defaultFavoritesHeight
             preferences.favoritesExpanded = false
+            preferences.favoritesHeight = 260
             let restored = AppModel(preferences: defaults); restored.state = state
             checks["favorites-persist"] = restored.visibleFavorites == [favorite] && !restored.favoritesExpanded
+            checks["favorites-height-persist"] = restored.favoritesHeight == 260
             var otherState = try await model.send("state")
             otherState["activeAccount"] = ["id": "other-account", "server": "https://example.invalid", "username": "other", "displayName": "其他账号"]
             restored.state = try JSONDecoder().decode(ClientState.self, from: JSONSerialization.data(withJSONObject: otherState))
@@ -438,7 +441,7 @@ enum NativeSelfTest {
         } catch let failure { error = failure.localizedDescription + "\n" + model.bridge.stderr }
         NativeDiagnostics.write("self-test requesting engine shutdown")
         checks["engine-shutdown"] = await AppDelegate.shared?.prepareForTermination() == true
-        let passed = checks.count == 46 && checks.values.allSatisfy { $0 } && error.isEmpty
+        let passed = checks.count == 48 && checks.values.allSatisfy { $0 } && error.isEmpty
         do {
             let output = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: ["passed": passed, "nativeControls": true, "checks": checks, "windowChrome": chrome, "error": error], options: [.prettyPrinted, .sortedKeys])

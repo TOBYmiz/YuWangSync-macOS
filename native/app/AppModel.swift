@@ -29,6 +29,11 @@ final class AppModel: ObservableObject {
     @Published var favoritesExpanded: Bool {
         didSet { preferences.set(favoritesExpanded, forKey: "sidebar.favoritesExpanded") }
     }
+    /// Height the user gave the expanded favorites pane; the directory tree takes the rest.
+    @Published var favoritesHeight: Double {
+        didSet { if oldValue != favoritesHeight { preferences.set(favoritesHeight, forKey: "sidebar.favoritesHeight") } }
+    }
+    static let defaultFavoritesHeight = 180.0
     private let preferences: UserDefaults
     private var started = false
     private let networkMonitor = NWPathMonitor()
@@ -60,6 +65,8 @@ final class AppModel: ObservableObject {
         self.preferences = defaults
         favoriteFolders = defaults.data(forKey: "sidebar.favorites").flatMap { try? JSONDecoder().decode([FavoriteFolder].self, from: $0) } ?? []
         favoritesExpanded = defaults.object(forKey: "sidebar.favoritesExpanded") as? Bool ?? true
+        let height = defaults.double(forKey: "sidebar.favoritesHeight")
+        favoritesHeight = height.isFinite && height >= 80 ? height : AppModel.defaultFavoritesHeight
     }
     var visibleFavorites: [FavoriteFolder] { favoriteFolders.filter { $0.accountId == state?.activeAccount?.id } }
     func favoriteEntry(_ favorite: FavoriteFolder) -> CloudEntry? {

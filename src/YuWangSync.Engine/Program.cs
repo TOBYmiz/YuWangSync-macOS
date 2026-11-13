@@ -51,6 +51,7 @@ public sealed class EngineHost : IAsyncDisposable
     private readonly Timer _stateTimer;
     private bool _running, _disposed;
     private long _lastProgress;
+    private int _stateScheduled;
     public EngineHost(LocalFiles files, bool demo)
     {
         _files = files; _demo = demo;
@@ -68,7 +69,11 @@ public sealed class EngineHost : IAsyncDisposable
                 File.AppendAllText(path, $"{DateTimeOffset.Now:O} {message.Replace('\r', ' ').Replace('\n', ' ')}\n");
             }
         };
-        _stateTimer = new(_ => { if (_running && !_disposed) _ = SendStateSafelyAsync(); }, null, Timeout.Infinite, Timeout.Infinite);
+        _stateTimer = new(_ =>
+        {
+            Interlocked.Exchange(ref _stateScheduled, 0);
+            if (_running && !_disposed) _ = SendStateSafelyAsync();
+        }, null, Timeout.Infinite, Timeout.Infinite);
         _workspace.Changed += ScheduleState;
         _workspace.Progress += progress =>
         {
@@ -95,7 +100,7 @@ public sealed class EngineHost : IAsyncDisposable
         await StopTreePreloadAsync();
         if (!_workspace.Offline)
             try { await _workspace.RefreshTreeAsync(_done.Token); } catch (IOException) { }
-        if (_workspace.ActiveAccount is { } account && _workspace.ProjectedEntries(account.Id).FirstOrDefault(e => e.IsDiskRoot) is { } root)
+        if (_workspace.ActiveAccount is { } account && _workspace.ProjectedEntries(account.Id, e => e.IsDiskRoot).FirstOrDefault() is { } root)
         {
             lock (_stateLock) _folder = root.Id;
             try { await _workspace.BrowseAsync(root.Id, ct: _done.Token); } catch (IOException) { }
@@ -121,11 +126,11 @@ public sealed class EngineHost : IAsyncDisposable
     public object State()
     {
         Guid? folder; lock (_stateLock) folder = _folder;
-        var all = _workspace.ActiveAccount is { } a ? _workspace.ProjectedEntries(a.Id) : [];
+        var all = _workspace.ActiveAccount is { } a ? _workspace.ProjectedEntries(a.Id, e => e.IsDirectory || e.ParentId == folder) : [];
         return new
         {
             version = YuWangCloudSync.Core.ProductVersion.Current, demo = _demo, accounts = _workspace.Store.Accounts(), activeAccount = _workspace.ActiveAccount,
-            folderId = folder, entries = all.Where(e => e.IsDirectory || e.ParentId == folder),
+            folderId = folder, entries = all,
             tree = _workspace.ActiveAccount is { } account ? _workspace.Store.Tree(account.Id) : [],
             operations = _workspace.Store.Operations(_workspace.ActiveAccount?.Id).OrderBy(o => o.IsTerminal).ThenByDescending(o => o.Created).Take(500),
             offline = _workspace.Offline, manualOffline = _workspace.ManualOffline, paused = _workspace.Paused,
@@ -133,7 +138,14 @@ public sealed class EngineHost : IAsyncDisposable
             settings = _workspace.Settings, networkCost = _workspace.NetworkCost
         };
     }
-    private void ScheduleState() { if (_running && !_disposed) _stateTimer.Change(100, Timeout.Infinite); }
+    // Throttle, not debounce: re-arming on every change starved state events for as long as
+    // preload or size probes kept notifying, hiding finished tasks until they stopped.
+    // Request replies send their own state immediately; this only paces background changes.
+    private void ScheduleState()
+    {
+        if (!_running || _disposed || Interlocked.Exchange(ref _stateScheduled, 1) != 0) return;
+        try { _stateTimer.Change(250, Timeout.Infinite); } catch (ObjectDisposedException) { }
+    }
     private async Task SendStateSafelyAsync()
     {
         try { if (!_workspace.IsStopping) await WriteAsync(new { @event = "state", data = State() }); }
@@ -214,6 +226,8 @@ public sealed class EngineHost : IAsyncDisposable
             // request already does, and a second full snapshot doubles client parsing.
             case "browse":
                 var folder = Id(p, "folderId"); lock (_stateLock) _folder = folder;
+                // The previous folder's size probes must not hold network slots during this listing.
+                StopSizeProbes();
                 // Show cached children immediately; a stale-listing refresh or a
                 // directory lock held by preload must not delay the switch.
                 if (_workspace.Store.GetEntry(folder)?.LastListed is not null) await SendStateSafelyAsync();
@@ -275,6 +289,12 @@ public sealed class EngineHost : IAsyncDisposable
             case "shutdown": await DisposeAsync(); return new { };
             default: throw new ArgumentException("未知命令。");
         }
+    }
+    private void StopSizeProbes()
+    {
+        CancellationTokenSource? previous;
+        lock (_stateLock) { previous = _sizeStop; _sizeStop = null; }
+        previous?.Cancel();
     }
     // Real sizes need one direct-link probe per file. Run them after the listing is
     // returned so entering a folder is not held up; leaving the folder cancels them.

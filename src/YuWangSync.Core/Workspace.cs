@@ -213,7 +213,9 @@ public sealed partial class Workspace : IAsyncDisposable
         roots.AddRange(existing.Where(e => e.IsDiskRoot && roots.All(r => r.Id != e.Id)).Select(e => e with { RemoteMissing = true }));
         Store.SaveTree(account.Id, tree); Store.Save(entries: roots); Notify();
     }
-    public IReadOnlyList<Entry> ProjectedEntries(Guid account)
+    // Callers that only need a slice (one folder, the directory tree) pass a filter on the
+    // projected entry so the status/sort work is not repeated for every file in the account.
+    public IReadOnlyList<Entry> ProjectedEntries(Guid account, Func<Entry, bool>? include = null)
     {
         var entries = Store.Entries(account).ToDictionary(e => e.Id);
         var operations = Store.Operations(account).Where(o => !o.IsTerminal).ToArray();
@@ -230,17 +232,18 @@ public sealed partial class Workspace : IAsyncDisposable
         }
         bool IsHidden(Entry entry)
         {
+            if (hidden.Count == 0) return false;
             var visited = new HashSet<Guid>();
             for (Entry? current = entry; current is not null && visited.Add(current.Id); current = current.ParentId is { } p ? entries.GetValueOrDefault(p) : null)
                 if (hidden.Contains(current.Id)) return true;
             return false;
         }
-        return entries.Values.Where(e => !IsHidden(e) && (!e.RemoteMissing || e.Dirty || operations.Any(o => o.EntryId == e.Id)))
+        return entries.Values.Where(e => (include is null || include(e)) && !IsHidden(e) && (!e.RemoteMissing || e.Dirty || operations.Any(o => o.EntryId == e.Id)))
             .Select(e => e.Status.Length > 0 ? e : e with { Status = e.Dirty ? "本地已修改" : e.LocalPath is not null ?
                 (e.DownloadStamp != e.RemoteStamp ? "云端有更新 · 本地副本保留" : e.KeepOffline ? "离线可用" : "已下载") : "云端" })
             .OrderByDescending(e => e.IsDirectory).ThenBy(e => e.Name, StringComparer.CurrentCulture).ToArray();
     }
-    public IReadOnlyList<Entry> Children(Guid parent) => ActiveAccount is { } a ? ProjectedEntries(a.Id).Where(e => e.ParentId == parent).ToArray() : [];
+    public IReadOnlyList<Entry> Children(Guid parent) => ActiveAccount is { } a ? ProjectedEntries(a.Id, e => e.ParentId == parent) : [];
     public async Task BrowseAsync(Guid parentId, bool force = false, CancellationToken ct = default, bool probeSizes = true)
     {
         var gate = _directoryLocks.GetOrAdd(parentId, _ => new(1, 1));
@@ -321,7 +324,7 @@ public sealed partial class Workspace : IAsyncDisposable
     {
         var account = ActiveAccount ?? throw new InvalidOperationException("请先选择账号。");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _accountStop.Token, _stop.Token);
-        var queue = new Queue<Guid>(ProjectedEntries(account.Id).Where(e => e.IsDiskRoot).Select(e => e.Id));
+        var queue = new Queue<Guid>(ProjectedEntries(account.Id, e => e.IsDiskRoot).Select(e => e.Id));
         var visited = new HashSet<Guid>();
         while (queue.TryDequeue(out var id))
         {

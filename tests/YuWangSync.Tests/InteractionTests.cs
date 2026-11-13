@@ -170,4 +170,54 @@ public sealed class InteractionTests
         }
         finally { Directory.Delete(root, true); }
     }
+
+    [Fact]
+    public void Entry_cache_matches_the_database_across_updates_and_reopen()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YuWangSync-cache-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(root, "data", "store.db");
+        Guid a = Guid.NewGuid(), b = Guid.NewGuid();
+        var first = new Entry { AccountId = a, Name = "first", IsDirectory = true };
+        var moved = new Entry { AccountId = a, Name = "moved" };
+        try
+        {
+            using (var store = new OperationStore(path))
+            {
+                store.SaveAccount(new Account(a, "https://example.invalid", "a")); store.SaveAccount(new Account(b, "https://example.invalid", "b"));
+                store.Save(entries: [first, moved]);
+                store.UpdateEntry(first.Id, e => e with { Name = "renamed" });
+                store.UpdateEntries([new Entry { Id = Guid.NewGuid(), AccountId = b, Name = "inserted" }], [(moved.Id, e => e with { AccountId = b })]);
+                Assert.Equal(["renamed"], store.Entries(a).Select(e => e.Name));
+                Assert.Equal(["inserted", "moved"], store.Entries(b).Select(e => e.Name).Order());
+                // A failed write must not leave a phantom in the cache.
+                Assert.ThrowsAny<Exception>(() => store.Save(entries: [new Entry { AccountId = a, Name = "ghost" }, null!]));
+                Assert.Equal(["renamed"], store.Entries(a).Select(e => e.Name));
+                store.RemoveAccount(b);
+                Assert.Empty(store.Entries(b)); Assert.Null(store.GetEntry(moved.Id));
+            }
+            using (var reopened = new OperationStore(path))
+            {
+                Assert.Equal(["renamed"], reopened.Entries(a).Select(e => e.Name));
+                Assert.Equal("renamed", reopened.GetEntry(first.Id)!.Name);
+                Assert.Empty(reopened.Entries(b));
+            }
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public async Task Filtered_projection_matches_the_full_projection()
+    {
+        await using var f = await Fixture.CreateAsync(); var w = f.Workspace; w.SetManualOffline(true);
+        var folder = f.Remote(2); var file = f.Remote(1);
+        var created = w.CreateFolder(f.Disk, "新目录");
+        w.Move(file.Id, folder.Id); w.Rename(folder.Id, "改名");
+        await w.DeleteAsync(created);
+        var full = w.ProjectedEntries(f.Account.Id);
+        foreach (var parent in new[] { f.Disk, folder.Id })
+            Assert.Equal(full.Where(e => e.ParentId == parent), w.Children(parent));
+        Assert.Equal(full.Where(e => e.IsDirectory), w.ProjectedEntries(f.Account.Id, e => e.IsDirectory));
+        Assert.Contains(w.Children(folder.Id), e => e.Id == file.Id);
+        Assert.DoesNotContain(w.Children(f.Disk), e => e.Id == created || e.Id == file.Id);
+    }
 }

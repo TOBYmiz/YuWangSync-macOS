@@ -33,13 +33,7 @@ struct RootView: View {
                     .buttonStyle(.borderless).help("添加账号")
             }.padding(12)
             Divider()
-            VSplitView {
-                NativeDirectoryTree(model: model).frame(minHeight: 120, maxHeight: .infinity)
-                FavoritesPane(model: model)
-                    .frame(minHeight: model.favoritesExpanded ? 80 : 36,
-                           idealHeight: model.favoritesExpanded ? 180 : 36,
-                           maxHeight: model.favoritesExpanded ? .infinity : 36)
-            }
+            SidebarSplit(model: model)
             Divider()
             connectionFooter
         }.frame(minWidth: 180, idealWidth: 230, maxWidth: 330, maxHeight: .infinity)
@@ -183,6 +177,55 @@ struct RootView: View {
                 }.buttonStyle(.plain).help(model.showTasks ? "隐藏任务面板" : "显示任务面板")
             }.font(.caption).padding(.horizontal, 16).padding(.vertical, 7)
         }
+    }
+}
+
+/// Directory tree above, favorites below. VSplitView cannot restore a divider position, so
+/// the favorites height lives in AppModel (persisted in the model's preferences domain).
+struct SidebarSplit: View {
+    @ObservedObject var model: AppModel
+    @State private var dragStart: Double?
+    @State private var dragHeight: Double?
+    @State private var cursorPushed = false
+    private static let treeMinimum = 120.0, favoritesMinimum = 80.0, collapsedHeight = 36.0
+    private func clamp(_ height: Double, in total: Double) -> Double {
+        min(max(height, Self.favoritesMinimum), max(Self.favoritesMinimum, total - Self.treeMinimum))
+    }
+    var body: some View {
+        GeometryReader { geometry in
+            let total = geometry.size.height
+            let height = model.favoritesExpanded ? clamp(dragHeight ?? model.favoritesHeight, in: total) : Self.collapsedHeight
+            VStack(spacing: 0) {
+                NativeDirectoryTree(model: model).frame(maxWidth: .infinity, maxHeight: .infinity)
+                if model.favoritesExpanded { handle(total: total) } else { Divider() }
+                FavoritesPane(model: model).frame(height: height)
+            }
+        }
+    }
+    private func handle(total: Double) -> some View {
+        ZStack { Color.clear; Divider() }
+            .frame(maxWidth: .infinity).frame(height: 7).contentShape(Rectangle())
+            .onHover { setResizeCursor($0) }
+            .onDisappear { setResizeCursor(false) }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    let start = dragStart ?? clamp(model.favoritesHeight, in: total)
+                    dragStart = start
+                    dragHeight = clamp(start - value.translation.height, in: total)
+                }
+                .onEnded { _ in
+                    // Persist once per drag rather than on every mouse move.
+                    if let dragHeight { model.favoritesHeight = dragHeight }
+                    dragStart = nil; dragHeight = nil
+                })
+            .accessibilityElement()
+            .accessibilityLabel("调整收藏区域高度")
+            .accessibilityIdentifier("sidebar-favorites-divider")
+    }
+    private func setResizeCursor(_ inside: Bool) {
+        guard inside != cursorPushed else { return }
+        cursorPushed = inside
+        if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
     }
 }
 

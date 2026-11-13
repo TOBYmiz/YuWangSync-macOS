@@ -29,6 +29,10 @@ public sealed class OperationStore : IOperationStore
 {
     private readonly SqliteConnection _db;
     private readonly object _gate = new();
+    // Entries are immutable records. Every projection, listing and state snapshot needs the
+    // whole account, so serve reads from memory instead of re-deserializing every row.
+    private readonly Dictionary<Guid, Entry> _entries = [];
+    private readonly Dictionary<Guid, Dictionary<Guid, Entry>> _accountEntries = [];
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
     public OperationStore(string path)
@@ -50,6 +54,7 @@ public sealed class OperationStore : IOperationStore
             PRAGMA user_version=1;
             """;
         cmd.ExecuteNonQuery();
+        foreach (var entry in Read<Entry>("SELECT json FROM entries")) Cache(entry);
         // A killed process may have sent a request without persisting its response.
         Save(operations: Operations().Where(o => o.State == OperationState.Running).Select(o => o with
         { State = o.VerificationStamp is null ? OperationState.Uncertain : OperationState.AwaitingVerification, Error = "上次运行中断，先核对云端结果。" }));
@@ -81,8 +86,17 @@ public sealed class OperationStore : IOperationStore
             else Write("INSERT OR REPLACE INTO preferences VALUES('active-account',$j)", ("$j", JsonSerializer.Serialize(value, Json)));
         }
     }
-    public IReadOnlyList<Entry> Entries(Guid account) => Read<Entry>("SELECT json FROM entries WHERE account=$a", ("$a", account.ToString()));
-    public Entry? GetEntry(Guid id) => Read<Entry>("SELECT json FROM entries WHERE id=$id", ("$id", id.ToString())).SingleOrDefault();
+    public IReadOnlyList<Entry> Entries(Guid account)
+    { lock (_gate) return _accountEntries.TryGetValue(account, out var entries) ? entries.Values.ToArray() : []; }
+    public Entry? GetEntry(Guid id) { lock (_gate) return _entries.GetValueOrDefault(id); }
+    private void Cache(Entry entry)
+    {
+        if (_entries.TryGetValue(entry.Id, out var previous) && previous.AccountId != entry.AccountId
+            && _accountEntries.TryGetValue(previous.AccountId, out var old)) old.Remove(entry.Id);
+        _entries[entry.Id] = entry;
+        if (!_accountEntries.TryGetValue(entry.AccountId, out var bucket)) _accountEntries[entry.AccountId] = bucket = [];
+        bucket[entry.Id] = entry;
+    }
     public Operation? GetOperation(Guid id) => Read<Operation>("SELECT json FROM operations WHERE id=$id", ("$id", id.ToString())).SingleOrDefault();
     public IReadOnlyList<Operation> Operations(Guid? account = null) => account is { } a
         ? Read<Operation>("SELECT json FROM operations WHERE account=$a ORDER BY created,rowid", ("$a", a.ToString()))
@@ -104,6 +118,7 @@ public sealed class OperationStore : IOperationStore
                 cmd.Parameters.AddWithValue("$a", account.ToString()); cmd.ExecuteNonQuery();
             }
             tx.Commit();
+            if (_accountEntries.Remove(account, out var removed)) foreach (var id in removed.Keys) _entries.Remove(id);
         }
     }
     private void Write(string sql, params (string, object?)[] values)
@@ -120,14 +135,18 @@ public sealed class OperationStore : IOperationStore
         lock (_gate)
         {
             using var tx = _db.BeginTransaction();
-            SaveCore(tx, entries, operations);
+            var saved = SaveCore(tx, entries, operations);
             tx.Commit();
+            foreach (var entry in saved) Cache(entry);
         }
     }
-    private void SaveCore(SqliteTransaction tx, IEnumerable<Entry>? entries, IEnumerable<Operation>? operations)
+    // Returns the written entries; callers update the cache only after the commit succeeds.
+    private List<Entry> SaveCore(SqliteTransaction tx, IEnumerable<Entry>? entries, IEnumerable<Operation>? operations)
     {
+        var saved = new List<Entry>();
         foreach (var entry in entries ?? [])
         {
+            saved.Add(entry);
             using var cmd = _db.CreateCommand(); cmd.Transaction = tx;
             cmd.CommandText = "INSERT INTO entries VALUES($id,$a,$j) ON CONFLICT(id) DO UPDATE SET account=$a,json=$j";
             cmd.Parameters.AddWithValue("$id", entry.Id.ToString()); cmd.Parameters.AddWithValue("$a", entry.AccountId.ToString());
@@ -140,6 +159,7 @@ public sealed class OperationStore : IOperationStore
             cmd.Parameters.AddWithValue("$id", op.Id.ToString()); cmd.Parameters.AddWithValue("$a", op.AccountId.ToString());
             cmd.Parameters.AddWithValue("$c", op.Created.ToString("O")); cmd.Parameters.AddWithValue("$j", JsonSerializer.Serialize(op, Json)); cmd.ExecuteNonQuery();
         }
+        return saved;
     }
     public void UpdateEntries(IEnumerable<Entry> inserts, IEnumerable<(Guid Id, Func<Entry, Entry> Update)> updates)
     {
@@ -155,6 +175,7 @@ public sealed class OperationStore : IOperationStore
             using var tx = _db.BeginTransaction();
             SaveCore(tx, changed.Values, null);
             tx.Commit();
+            foreach (var entry in changed.Values) Cache(entry);
         }
     }
     public void RemoveOperations(IEnumerable<Guid> ids, IEnumerable<Operation> rewritten)

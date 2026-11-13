@@ -66,7 +66,7 @@ public sealed partial class Workspace
                         Store.Save(operations: [previous with { SnapshotPath = snapshot.Path, SnapshotHash = snapshot.Hash, SnapshotLength = snapshot.Length }]);
                     else
                     {
-                        var projected = ProjectedEntries(account.Id).FirstOrDefault(e => e.Id == entry.Id);
+                        var projected = ProjectedEntries(account.Id, e => e.Id == entry.Id).FirstOrDefault();
                         if (projected is null) continue; // A queued delete has precedence; bytes remain protected.
                         Store.Save(operations: [NewOperation(projected, OperationKind.Upload, projected.ParentId ?? parent, projected.Name) with
                         { SnapshotPath = snapshot.Path, SnapshotHash = snapshot.Hash, SnapshotLength = snapshot.Length,

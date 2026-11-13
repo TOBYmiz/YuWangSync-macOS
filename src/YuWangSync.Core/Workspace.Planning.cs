@@ -8,7 +8,7 @@ public sealed partial class Workspace
     private Entry Projected(Guid id)
     {
         var raw = RequireEntry(id);
-        return ProjectedEntries(raw.AccountId).FirstOrDefault(e => e.Id == id) ?? throw new IOException("条目已排队删除。");
+        return ProjectedEntries(raw.AccountId, e => e.Id == id).FirstOrDefault() ?? throw new IOException("条目已排队删除。");
     }
     private List<Guid> Dependencies(Guid account, params Guid[] entries)
     {

@@ -149,7 +149,7 @@ enum NativeBrowserSelfTest {
             var body = wire, items = wireEntries, finalFrame = Data()
             for index in 0..<8 {
                 items[index + 1]["lastListed"] = stamp
-                body["entries"] = items; body["connectionStatus"] = "目录预加载 \(index)"
+                body["entries"] = items; body["connectionStatus"] = "目录状态更新 \(index)"
                 var frame = try JSONSerialization.data(withJSONObject: ["event": "state", "data": body]); frame.append(10)
                 finalFrame = frame
                 // Split a line as the OS pipe would; do not assume one read per event.
@@ -179,15 +179,15 @@ enum NativeBrowserSelfTest {
         }
         try await producer.value
         try await Task.sleep(nanoseconds: 100_000_000)
-        checks["preload-no-full-tree-reload"] = outline.fullReloadCount == reloadsBefore
-        checks["preload-state-reader-order"] = replyReceived && received > 0 && test.state?.connectionStatus == "目录预加载 7"
-        checks["preload-index-prepared-off-main"] = preparedIndexUsed && received > 0
+        checks["metadata-updates-no-full-tree-reload"] = outline.fullReloadCount == reloadsBefore
+        checks["metadata-update-state-reader-order"] = replyReceived && received > 0 && test.state?.connectionStatus == "目录状态更新 7"
+        checks["metadata-update-index-prepared-off-main"] = preparedIndexUsed && received > 0
         checks["state-progress-wire-order"] = Array(outputOrder.suffix(3)) == ["progress", "state", "reply"]
         checks["cached-drive-disclosure-responsive"] = maxToggle < 0.5 && maxGap < 0.5
-        checks["preload-drive-expansion-retained"] = outline.isItemExpanded(drive) && outline.isItemExpanded(disk)
+        checks["metadata-update-drive-expansion-retained"] = outline.isItemExpanded(drive) && outline.isItemExpanded(disk)
         let metrics: [String: Any] = ["directoryCount": 10_000, "stateEvents": received,
             "maxCachedDriveToggleMs": maxToggle * 1000, "maxMainLoopGapMs": maxGap * 1000,
-            "fullTreeReloadsDuringPreload": outline.fullReloadCount - reloadsBefore]
+            "fullTreeReloadsDuringUpdates": outline.fullReloadCount - reloadsBefore]
         try JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]).write(
             to: URL(fileURLWithPath: output).deletingPathExtension().appendingPathExtension("performance.json"))
         NativeDiagnostics.write("browser performance: \(metrics)")
@@ -204,7 +204,7 @@ enum NativeBrowserSelfTest {
         NativeDiagnostics.write("browser interaction: shift click returned")
         checks["file-shift-range-selection"] = table.selectedRowIndexes == IndexSet(integersIn: 0...3) && test.selection.count == 4
         let selected = test.selection
-        // Background metadata/preload updates must neither clear selection nor expand collapsed drives.
+        // Background metadata updates must neither clear selection nor expand collapsed drives.
         entries.append(CloudEntry(id: "background-folder", accountId: root.accountId, parentId: root.id, diskId: root.diskId,
             remoteId: 99_999, name: "后台新增目录", isDirectory: true, isDiskRoot: false, size: nil, sizeLabel: "—", uploadTime: stamp,
             localPath: nil, lastListed: stamp, status: "云端"))

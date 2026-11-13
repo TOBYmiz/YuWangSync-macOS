@@ -13,22 +13,27 @@ public sealed class InteractionTests
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     [Fact]
-    public async Task Directory_preload_builds_unvisited_branches_and_skips_unavailable_folders()
+    public async Task Entering_directory_lists_one_level_and_persists_it()
     {
         await using var f = await Fixture.CreateAsync();
         f.Cloud.Items[90] = new(90, 2, "nested", true, [], DateTime.UtcNow);
         f.Cloud.Items[91] = new(91, 90, "deeper", true, [], DateTime.UtcNow);
-        f.Cloud.Items[92] = new(92, 0, "unavailable", true, [], DateTime.UtcNow);
-        f.Cloud.FailingFolder = 92;
-        await f.Workspace.BrowseAsync(f.Disk, true);
-        var sizeCalls = f.Cloud.SizeCalls;
-        await f.Workspace.PreloadDirectoriesAsync();
-        Assert.NotNull(f.Remote(2).LastListed);
-        Assert.NotNull(f.Remote(90).LastListed);
-        Assert.NotNull(f.Remote(91).LastListed);
-        Assert.Equal(f.Remote(90).Id, f.Remote(91).ParentId);
-        Assert.Null(f.Remote(92).LastListed);
-        Assert.Equal(sizeCalls, f.Cloud.SizeCalls); // Building the tree does not probe every file in the account.
+        var folder = f.Remote(2);
+        Assert.Null(folder.LastListed);
+        await f.Workspace.BrowseAsync(folder.Id, probeSizes: false);
+        var nested = f.Remote(90);
+        Assert.NotNull(f.Workspace.Store.GetEntry(folder.Id)!.LastListed);
+        Assert.Null(nested.LastListed);
+        Assert.DoesNotContain(f.Workspace.Store.Entries(f.Account.Id), entry => entry.RemoteId == 91);
+
+        await f.Workspace.BrowseAsync(nested.Id, probeSizes: false);
+        var deeper = f.Remote(91);
+        Assert.Equal(nested.Id, deeper.ParentId);
+        Assert.NotNull(f.Workspace.Store.GetEntry(nested.Id)!.LastListed);
+        await f.ReopenAsync();
+        Assert.NotNull(f.Workspace.Store.GetEntry(folder.Id)!.LastListed);
+        Assert.NotNull(f.Workspace.Store.GetEntry(nested.Id)!.LastListed);
+        Assert.Equal(nested.Id, f.Remote(91).ParentId);
     }
 
     [Fact]

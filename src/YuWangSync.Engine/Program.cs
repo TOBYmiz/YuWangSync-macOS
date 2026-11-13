@@ -41,8 +41,7 @@ public sealed class EngineHost : IAsyncDisposable
     private readonly SemaphoreSlim _output = new(1, 1), _loginGate = new(1, 1);
     private readonly CancellationTokenSource _done = new();
     private CancellationTokenSource? _transfer, _loginStop;
-    private CancellationTokenSource? _treeStop, _sizeStop;
-    private Task _treePreload = Task.CompletedTask;
+    private CancellationTokenSource? _sizeStop;
     private ICloudClient? _login;
     private Account? _loginAccount;
     private string? _loginPassword;
@@ -97,7 +96,6 @@ public sealed class EngineHost : IAsyncDisposable
     }
     private async Task LoadAccountAsync()
     {
-        await StopTreePreloadAsync();
         if (!_workspace.Offline)
             try { await _workspace.RefreshTreeAsync(_done.Token); } catch (IOException) { }
         if (_workspace.ActiveAccount is { } account && _workspace.ProjectedEntries(account.Id, e => e.IsDiskRoot).FirstOrDefault() is { } root)
@@ -105,23 +103,6 @@ public sealed class EngineHost : IAsyncDisposable
             lock (_stateLock) _folder = root.Id;
             try { await _workspace.BrowseAsync(root.Id, ct: _done.Token, probePermission: true); } catch (IOException) { }
         }
-        if (!_workspace.Offline && _workspace.ActiveAccount is not null)
-        {
-            _treeStop = CancellationTokenSource.CreateLinkedTokenSource(_done.Token);
-            var token = _treeStop.Token;
-            _treePreload = Task.Run(async () =>
-            {
-                try { await _workspace.PreloadDirectoriesAsync(token); }
-                catch (OperationCanceledException) { }
-                catch (Exception error) when (error is IOException or HttpRequestException)
-                { _workspace.Log?.Invoke("目录预加载未完成，可展开节点重试。"); }
-            });
-        }
-    }
-    private async Task StopTreePreloadAsync()
-    {
-        _treeStop?.Cancel(); await _treePreload;
-        _treeStop?.Dispose(); _treeStop = null;
     }
     public object State()
     {
@@ -138,8 +119,8 @@ public sealed class EngineHost : IAsyncDisposable
             settings = _workspace.Settings, networkCost = _workspace.NetworkCost
         };
     }
-    // Throttle, not debounce: re-arming on every change starved state events for as long as
-    // preload or size probes kept notifying, hiding finished tasks until they stopped.
+    // Throttle, not debounce: re-arming on every change starved state events while
+    // background metadata or size probes kept notifying, hiding finished tasks.
     // Request replies send their own state immediately; this only paces background changes.
     private void ScheduleState()
     {
@@ -228,8 +209,7 @@ public sealed class EngineHost : IAsyncDisposable
                 var folder = Id(p, "folderId"); lock (_stateLock) _folder = folder;
                 // The previous folder's size probes must not hold network slots during this listing.
                 StopSizeProbes();
-                // Show cached children immediately; a stale-listing refresh or a
-                // directory lock held by preload must not delay the switch.
+                // Show cached children immediately while this directory is refreshed.
                 if (_workspace.Store.GetEntry(folder)?.LastListed is not null) await SendStateSafelyAsync();
                 await _workspace.BrowseAsync(folder, Flag(p, "force"), _done.Token, probeSizes: false, probePermission: true);
                 ProbeSizesInBackground(folder); return new { };
@@ -350,7 +330,6 @@ public sealed class EngineHost : IAsyncDisposable
     {
         if (_disposed) return; _disposed = true; _running = false; _stateTimer.Dispose();
         _workspace.Changed -= ScheduleState; _transfer?.Cancel(); _loginStop?.Cancel(); _sizeStop?.Cancel(); _login?.Dispose();
-        await StopTreePreloadAsync();
         await _workspace.DisposeAsync();
     }
 }

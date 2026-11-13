@@ -341,25 +341,6 @@ public sealed partial class Workspace : IAsyncDisposable
             { Log?.Invoke("文件大小暂未确认，保留声明值：" + SafeError(error)); }
         });
     }
-    public async Task PreloadDirectoriesAsync(CancellationToken ct = default)
-    {
-        var account = ActiveAccount ?? throw new InvalidOperationException("请先选择账号。");
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _accountStop.Token, _stop.Token);
-        var queue = new Queue<Guid>(ProjectedEntries(account.Id, e => e.IsDiskRoot).Select(e => e.Id));
-        var visited = new HashSet<Guid>();
-        while (queue.TryDequeue(out var id))
-        {
-            linked.Token.ThrowIfCancellationRequested();
-            if (!visited.Add(id)) continue;
-            try
-            {
-                await BrowseAsync(id, ct: linked.Token, probeSizes: false);
-                foreach (var child in Children(id).Where(e => e.IsDirectory)) queue.Enqueue(child.Id);
-            }
-            catch (Exception error) when (error is IOException or HttpRequestException)
-            { Log?.Invoke("目录预加载稍后可重试：" + SafeError(error)); }
-        }
-    }
     public async Task<string> EnsureLocalAsync(Guid id, bool keepOffline = false, CancellationToken ct = default)
     {
         using var foreground = BeginForegroundTransfer();

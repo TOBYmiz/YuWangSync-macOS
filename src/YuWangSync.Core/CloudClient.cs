@@ -12,6 +12,10 @@ public interface ICloudClient : IDisposable
     Task<bool> LoginAsync(string code, CancellationToken ct);
     Task<IReadOnlyList<DiskTreeNode>> TreeAsync(CancellationToken ct);
     Task<FolderListingResult> ListAsync(ulong disk, ulong folder, CancellationToken ct);
+    Task<FolderListingResult> ListWithPermissionAsync(ulong disk, ulong folder, CancellationToken ct)
+        => ListAsync(disk, folder, ct);
+    async Task<DirectoryPermission> ProbePermissionAsync(ulong disk, ulong folder, CancellationToken ct)
+        => (await ListWithPermissionAsync(disk, folder, ct)).Permission;
     Task<long?> SizeAsync(Entry entry, CancellationToken ct);
     Task<DownloadReceipt> DownloadAsync(Entry entry, Stream output, Action<long, long>? progress, CancellationToken ct);
     Task<DownloadReceipt> HashAsync(Entry entry, CancellationToken ct);
@@ -41,10 +45,18 @@ public sealed class CloudClient : ICloudClient
     }
     public async Task<FolderListingResult> ListAsync(ulong disk, ulong folder, CancellationToken ct)
     {
-        var result = await _client.InCallAsync(ct, () => _client.ListFolderWithPermissionsAsync(disk, folder, fresh: true));
+        var result = await _client.InCallAsync(ct, () => _client.ListFolderWithPermissionsAsync(disk, folder, fresh: true, probePermission: false));
         if (!result.IsValidPage) throw new IOException("云端返回的目录不完整或登录已过期，保留缓存并停止写入。");
         return result;
     }
+    public async Task<FolderListingResult> ListWithPermissionAsync(ulong disk, ulong folder, CancellationToken ct)
+    {
+        var result = await _client.InCallAsync(ct, () => _client.ListFolderWithPermissionsAsync(disk, folder, fresh: true, probePermission: true));
+        if (!result.IsValidPage) throw new IOException("云端返回的目录不完整或登录已过期，保留缓存并停止写入。");
+        return result;
+    }
+    public Task<DirectoryPermission> ProbePermissionAsync(ulong disk, ulong folder, CancellationToken ct)
+        => _client.InCallAsync(ct, () => _client.ProbeDirectoryPermissionAsync(disk, folder));
     public Task<DownloadReceipt> DownloadAsync(Entry entry, Stream output, Action<long, long>? progress, CancellationToken ct)
         => _client.DownloadToAsync(entry.RemoteId, entry.Name, entry.DeclaredSize ?? entry.Size, output, progress, ct);
     public async Task<long?> SizeAsync(Entry entry, CancellationToken ct)

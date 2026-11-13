@@ -103,7 +103,7 @@ public sealed class EngineHost : IAsyncDisposable
         if (_workspace.ActiveAccount is { } account && _workspace.ProjectedEntries(account.Id, e => e.IsDiskRoot).FirstOrDefault() is { } root)
         {
             lock (_stateLock) _folder = root.Id;
-            try { await _workspace.BrowseAsync(root.Id, ct: _done.Token); } catch (IOException) { }
+            try { await _workspace.BrowseAsync(root.Id, ct: _done.Token, probePermission: true); } catch (IOException) { }
         }
         if (!_workspace.Offline && _workspace.ActiveAccount is not null)
         {
@@ -231,14 +231,14 @@ public sealed class EngineHost : IAsyncDisposable
                 // Show cached children immediately; a stale-listing refresh or a
                 // directory lock held by preload must not delay the switch.
                 if (_workspace.Store.GetEntry(folder)?.LastListed is not null) await SendStateSafelyAsync();
-                await _workspace.BrowseAsync(folder, Flag(p, "force"), _done.Token, probeSizes: false);
+                await _workspace.BrowseAsync(folder, Flag(p, "force"), _done.Token, probeSizes: false, probePermission: true);
                 ProbeSizesInBackground(folder); return new { };
             case "loadFolder":
-                await _workspace.BrowseAsync(Id(p, "folderId"), ct: _done.Token, probeSizes: false); return new { };
+                await _workspace.BrowseAsync(Id(p, "folderId"), ct: _done.Token, probeSizes: false, probePermission: true); return new { };
             case "refresh":
                 if (_workspace.Offline && !_workspace.ManualOffline) await _workspace.ReconnectAsync(_done.Token);
                 Guid? current; lock (_stateLock) current = _folder;
-                if (current is { } root) { await _workspace.BrowseAsync(root, true, _done.Token, probeSizes: false); ProbeSizesInBackground(root); }
+                if (current is { } root) { await _workspace.BrowseAsync(root, true, _done.Token, probeSizes: false, probePermission: true); ProbeSizesInBackground(root); }
                 else await _workspace.RefreshTreeAsync(_done.Token);
                 return new { };
             case "open":

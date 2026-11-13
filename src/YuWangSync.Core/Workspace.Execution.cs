@@ -197,7 +197,8 @@ public sealed partial class Workspace
         var parent = RequireEntry(op.TargetParentId ?? entry.ParentId ?? throw new IOException("任务缺少父目录。"));
         if (parent.AccountId != op.AccountId || parent.DiskId != entry.DiskId || !parent.IsDirectory) throw new IOException("目标目录身份不符。");
         if (!parent.IsDiskRoot && parent.RemoteId == 0) throw new IOException("目标目录尚未创建。");
-        var target = await cloud.ListAsync(parent.DiskId, parent.RemoteId, ct); RequireWritable(target);
+        var target = await cloud.ListWithPermissionAsync(parent.DiskId, parent.RemoteId, ct);
+        PersistPermission(parent, target); RequireWritable(target);
         switch (op.Kind)
         {
             case OperationKind.CreateFolder:
@@ -225,7 +226,8 @@ public sealed partial class Workspace
             {
                 CheckMutable(entry);
                 var sourceParent = RequireEntry(entry.ParentId!.Value);
-                var source = sourceParent.Id == parent.Id ? target : await cloud.ListAsync(entry.DiskId, sourceParent.RemoteId, ct);
+                var source = sourceParent.Id == parent.Id ? target : await cloud.ListWithPermissionAsync(entry.DiskId, sourceParent.RemoteId, ct);
+                if (sourceParent.Id != parent.Id) PersistPermission(sourceParent, source);
                 RequireWritable(source);
                 var old = source.Items.SingleOrDefault(i => i.Id == entry.RemoteId && i.IsFolder == entry.IsDirectory);
                 if (op.Kind == OperationKind.Delete && old is null)
@@ -322,6 +324,11 @@ public sealed partial class Workspace
     private static Entry FromRemote(Entry entry, YuWangItem remote, Guid parent) => entry with
     { RemoteId = remote.Id, Name = remote.Name, ParentId = parent, Size = remote.Size, DeclaredSize = remote.Size, SizeStamp = null, UploadTime = remote.UploadTime,
         RemoteStamp = Entry.Stamp(remote), RemoteMissing = false };
+    private void PersistPermission(Entry directory, FolderListingResult listing)
+    {
+        if (listing.IsValidPage)
+            Store.UpdateEntry(directory.Id, current => current with { Permission = listing.Permission });
+    }
     private async Task<Dictionary<ulong, string>> RemoteTreeAsync(ulong disk, ulong folder, ICloudClient cloud, CancellationToken ct)
     {
         var result = new Dictionary<ulong, string>(); var visited = new HashSet<ulong>();

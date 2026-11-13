@@ -244,7 +244,8 @@ public sealed partial class Workspace : IAsyncDisposable
             .OrderByDescending(e => e.IsDirectory).ThenBy(e => e.Name, StringComparer.CurrentCulture).ToArray();
     }
     public IReadOnlyList<Entry> Children(Guid parent) => ActiveAccount is { } a ? ProjectedEntries(a.Id, e => e.ParentId == parent) : [];
-    public async Task BrowseAsync(Guid parentId, bool force = false, CancellationToken ct = default, bool probeSizes = true)
+    public async Task BrowseAsync(Guid parentId, bool force = false, CancellationToken ct = default,
+        bool probeSizes = true, bool probePermission = false)
     {
         var gate = _directoryLocks.GetOrAdd(parentId, _ => new(1, 1));
         await gate.WaitAsync(ct);
@@ -253,20 +254,38 @@ public sealed partial class Workspace : IAsyncDisposable
             var parent = Store.GetEntry(parentId) ?? throw new IOException("目录不存在。");
             if (!parent.IsDirectory || parent.RemoteId == 0 && !parent.IsDiskRoot) return;
             if (Offline || ManualOffline) { Notify(); return; }
-            if (force || parent.LastListed is not { } listed || DateTimeOffset.UtcNow - listed >= TimeSpan.FromMinutes(30))
+            var refreshListing = force || parent.LastListed is not { } listed || DateTimeOffset.UtcNow - listed >= TimeSpan.FromMinutes(30);
+            // Permission is durable metadata. Probe it lazily for a new directory, or
+            // when the user explicitly refreshes; ordinary cached opens reuse the value.
+            var shouldProbePermission = probePermission && (force || parent.Permission == DirectoryPermission.Unknown);
+            if (refreshListing)
             {
-                var result = await WithCloudAsync(parent.AccountId, (c, t) => c.ListAsync(parent.DiskId, parent.RemoteId, t), ct);
-                ApplyListing(parent, result); Notify();
+                var result = await WithCloudAsync(parent.AccountId, (c, t) => shouldProbePermission
+                    ? c.ListWithPermissionAsync(parent.DiskId, parent.RemoteId, t)
+                    : c.ListAsync(parent.DiskId, parent.RemoteId, t), ct);
+                ApplyListing(parent, result, shouldProbePermission); Notify();
+            }
+            else if (shouldProbePermission)
+            {
+                var permission = DirectoryPermission.Unknown;
+                try
+                {
+                    permission = await WithCloudAsync(parent.AccountId,
+                        (c, t) => c.ProbePermissionAsync(parent.DiskId, parent.RemoteId, t), ct);
+                }
+                catch (Exception error) when (error is IOException or HttpRequestException)
+                { Log?.Invoke("目录权限暂未确认：" + SafeError(error)); }
+                Store.UpdateEntry(parent.Id, current => current with { Permission = permission }); Notify();
             }
         }
         finally { gate.Release(); }
         if (probeSizes && !Offline && !ManualOffline) await RefreshSizesAsync(parentId, ct);
     }
-    private void ApplyListing(Entry parent, FolderListingResult result)
+    private void ApplyListing(Entry parent, FolderListingResult result, bool permissionWasProbed = false)
     {
-        lock (_metadataGate) ApplyListingCore(parent, result);
+        lock (_metadataGate) ApplyListingCore(parent, result, permissionWasProbed);
     }
-    private void ApplyListingCore(Entry parent, FolderListingResult result)
+    private void ApplyListingCore(Entry parent, FolderListingResult result, bool permissionWasProbed)
     {
         if (!result.IsValidPage) throw new IOException("目录结果不完整。");
         var existing = Store.Entries(parent.AccountId);
@@ -299,7 +318,9 @@ public sealed partial class Workspace : IAsyncDisposable
         }
         foreach (var missing in existing.Where(e => e.ParentId == parent.Id && e.RemoteId != 0 && !seen.Contains(e.Id)))
             updates.Add((missing.Id, current => current.ParentId == parent.Id && current.RemoteId == missing.RemoteId ? current with { RemoteMissing = true } : current));
-        updates.Add((parent.Id, current => current with { LastListed = DateTimeOffset.UtcNow, Permission = result.Permission }));
+        updates.Add((parent.Id, current => current with { LastListed = DateTimeOffset.UtcNow,
+            Permission = result.Permission != DirectoryPermission.Unknown ? result.Permission
+                : permissionWasProbed ? DirectoryPermission.Unknown : current.Permission }));
         // One transaction per listing: per-item commits with synchronous=FULL made entering large folders slow.
         Store.UpdateEntries(inserts, updates);
     }

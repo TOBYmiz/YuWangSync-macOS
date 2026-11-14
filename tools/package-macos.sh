@@ -5,7 +5,7 @@ cd "$root"
 [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo 'Requires an Apple Silicon Mac.' >&2; exit 1; }
 source_version="$(sed -n 's/^[[:space:]]*<Version>\([^<]*\)<\/Version>.*/\1/p' Directory.Build.props | head -n1)"
 release_version="${YUWANG_RELEASE_VERSION:-$source_version}"
-product_version="$(sed -n 's/.*ProductVersion.Current = "\([^"]*\)".*/\1/p' src/YuWangSync.Core/Protocol/ProductIdentity.cs | head -n1)"
+product_version="$(sed -n 's/.*public const string Current = "\([^"]*\)".*/\1/p' src/YuWangSync.Core/Protocol/ProductIdentity.cs | head -n1)"
 [[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$release_version" == "$source_version" && "$product_version" == "$source_version" ]] || {
   echo 'The configured, assembly, and product versions must match the stable x.y.z source version.' >&2; exit 1;
 }

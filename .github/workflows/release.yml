@@ -74,7 +74,7 @@ jobs:
           props = ET.parse('Directory.Build.props').getroot()
           source_version = props.findtext('.//Version')
           product_source = pathlib.Path('src/YuWangSync.Core/Protocol/ProductIdentity.cs').read_text(encoding='utf-8')
-          match = re.search(r'ProductVersion\.Current\s*=\s*"([^"]+)"', product_source)
+          match = re.search(r'public\s+const\s+string\s+Current\s*=\s*"([^"]+)"', product_source)
           configured = __import__('os').environ['RELEASE_VERSION']
           if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', configured):
               sys.exit('Release version must use x.y.z format.')

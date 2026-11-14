@@ -231,15 +231,24 @@ public sealed partial class Workspace : IAsyncDisposable
         roots.AddRange(existing.Where(e => e.IsDiskRoot && roots.All(r => r.Id != e.Id)).Select(e => e with { RemoteMissing = true }));
         Store.SaveTree(account.Id, tree); Store.Save(entries: roots); Notify();
     }
-    // Callers that only need a slice (one folder, the directory tree) pass a filter on the
-    // projected entry so the status/sort work is not repeated for every file in the account.
+    // General projections serve planning and account-wide scans; the browser uses its
+    // indexed folder/directory slice below to avoid walking every cached file.
     public IReadOnlyList<Entry> ProjectedEntries(Guid account, Func<Entry, bool>? include = null)
+        => ProjectEntries(account, Store.Entries(account), include);
+
+    public IReadOnlyList<Entry> ProjectedBrowserEntries(Guid account, Guid? parent)
+        => ProjectEntries(account, Store.EntriesForBrowser(account, parent), e => e.IsDirectory || e.ParentId == parent);
+
+    private IReadOnlyList<Entry> ProjectEntries(Guid account, IReadOnlyList<Entry> source, Func<Entry, bool>? include)
     {
-        var entries = Store.Entries(account).ToDictionary(e => e.Id);
+        var entries = source.ToDictionary(e => e.Id);
         var operations = Store.Operations(account).Where(o => !o.IsTerminal).ToArray();
+        var pendingEntries = operations.Select(o => o.EntryId).ToHashSet();
         var hidden = new HashSet<Guid>();
         foreach (var op in operations)
         {
+            // A pending move may bring an entry from another folder into this slice.
+            if (!entries.ContainsKey(op.EntryId) && Store.GetEntry(op.EntryId) is { } stored) entries[stored.Id] = stored;
             if (!entries.TryGetValue(op.EntryId, out var entry)) continue;
             var status = op.KindLabel + " · " + op.StateLabel;
             if (op.Kind is OperationKind.Rename or OperationKind.Upload or OperationKind.CreateFolder)
@@ -256,7 +265,7 @@ public sealed partial class Workspace : IAsyncDisposable
                 if (hidden.Contains(current.Id)) return true;
             return false;
         }
-        return entries.Values.Where(e => (include is null || include(e)) && !IsHidden(e) && (!e.RemoteMissing || e.Dirty || operations.Any(o => o.EntryId == e.Id)))
+        return entries.Values.Where(e => (include is null || include(e)) && !IsHidden(e) && (!e.RemoteMissing || e.Dirty || pendingEntries.Contains(e.Id)))
             .Select(e => e.Status.Length > 0 ? e : e with { Status = e.Dirty ? "本地已修改" : e.LocalPath is not null ?
                 (e.DownloadStamp != e.RemoteStamp ? "云端有更新 · 本地副本保留" : e.KeepOffline ? "离线可用" : "已下载") : "云端" })
             .OrderByDescending(e => e.IsDirectory).ThenBy(e => e.Name, StringComparer.CurrentCulture).ToArray();
@@ -281,7 +290,7 @@ public sealed partial class Workspace : IAsyncDisposable
                 var result = await WithCloudAsync(parent.AccountId, (c, t) => shouldProbePermission
                     ? c.ListWithPermissionAsync(parent.DiskId, parent.RemoteId, t)
                     : c.ListAsync(parent.DiskId, parent.RemoteId, t), ct, lowPriority: lowPriority);
-                ApplyListing(parent, result, shouldProbePermission); Notify();
+                await ApplyListingAsync(parent, result, shouldProbePermission, ct); Notify();
             }
             else if (shouldProbePermission)
             {
@@ -299,22 +308,27 @@ public sealed partial class Workspace : IAsyncDisposable
         finally { gate.Release(); }
         if (probeSizes && !Offline && !ManualOffline) await RefreshSizesAsync(parentId, ct);
     }
-    private void ApplyListing(Entry parent, FolderListingResult result, bool permissionWasProbed = false)
-    {
-        lock (_metadataGate) ApplyListingCore(parent, result, permissionWasProbed);
-    }
+    private Task ApplyListingAsync(Entry parent, FolderListingResult result, bool permissionWasProbed, CancellationToken ct)
+        => Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            // The listing merge and its single FULL-synchronous transaction stay atomic
+            // relative to operation completion, while the async browse caller can yield.
+            lock (_metadataGate) ApplyListingCore(parent, result, permissionWasProbed);
+        }, ct);
+
     private void ApplyListingCore(Entry parent, FolderListingResult result, bool permissionWasProbed)
     {
         if (!result.IsValidPage) throw new IOException("目录结果不完整。");
-        var existing = Store.Entries(parent.AccountId);
+        var existing = Store.EntriesInFolder(parent.AccountId, parent.Id);
         var uploading = Store.Operations(parent.AccountId).Where(o => o.Kind == OperationKind.Upload
             && o.State == OperationState.Running && o.MutationStarted && o.TargetParentId == parent.Id).ToArray();
         var known = new Dictionary<(ulong, ulong, bool), Entry>();
-        foreach (var e in existing) if (!e.IsDiskRoot && e.DiskId == parent.DiskId) known.TryAdd((e.DiskId, e.RemoteId, e.IsDirectory), e);
         var seen = new HashSet<Guid>(); var inserts = new List<Entry>(); var updates = new List<(Guid, Func<Entry, Entry>)>();
         foreach (var item in result.Items)
         {
-            var entry = known.GetValueOrDefault((parent.DiskId, item.Id, item.IsFolder));
+            var key = (parent.DiskId, item.Id, item.IsFolder);
+            var entry = known.GetValueOrDefault(key) ?? Store.FindRemoteEntry(parent.AccountId, parent.DiskId, item.Id, item.IsFolder);
             // A published upload is still being hash-verified. Keep its existing
             // local queue identity rather than adding a second entity during a refresh.
             if (entry is null && !item.IsFolder && uploading.Any(o =>
@@ -330,8 +344,9 @@ public sealed partial class Workspace : IAsyncDisposable
             else
             {
                 entry = new Entry { AccountId = parent.AccountId, DiskId = parent.DiskId, RemoteId = item.Id, IsDirectory = item.IsFolder };
-                inserts.Add(Update(entry)); known[(parent.DiskId, item.Id, item.IsFolder)] = entry;
+                inserts.Add(Update(entry));
             }
+            known[key] = entry;
             seen.Add(entry.Id);
         }
         foreach (var missing in existing.Where(e => e.ParentId == parent.Id && e.RemoteId != 0 && !seen.Contains(e.Id)))

@@ -117,20 +117,20 @@ public sealed class EngineHost : IAsyncDisposable
     private void SetCurrentFolderFromCache()
     {
         var root = _workspace.ActiveAccount is { } account
-            ? _workspace.ProjectedEntries(account.Id, e => e.IsDiskRoot).FirstOrDefault()
+            ? _workspace.ProjectedBrowserEntries(account.Id, null).FirstOrDefault(e => e.IsDiskRoot)
             : null;
         lock (_stateLock) _folder = root?.Id;
     }
     public object State()
     {
         Guid? folder; lock (_stateLock) folder = _folder;
-        var all = _workspace.ActiveAccount is { } a ? _workspace.ProjectedEntries(a.Id, e => e.IsDirectory || e.ParentId == folder) : [];
+        var all = _workspace.ActiveAccount is { } a ? _workspace.ProjectedBrowserEntries(a.Id, folder) : [];
         return new
         {
             version = YuWangCloudSync.Core.ProductVersion.Current, demo = _demo, accounts = _workspace.Store.Accounts(), activeAccount = _workspace.ActiveAccount,
             folderId = folder, entries = all,
             tree = _workspace.ActiveAccount is { } account ? _workspace.Store.Tree(account.Id) : [],
-            operations = _workspace.Store.Operations(_workspace.ActiveAccount?.Id).OrderBy(o => o.IsTerminal).ThenByDescending(o => o.Created).Take(500),
+            operations = _workspace.Store.Operations(_workspace.ActiveAccount?.Id).OrderBy(o => o.IsTerminal).ThenByDescending(o => o.Created).Take(500).ToArray(),
             offline = _workspace.Offline, manualOffline = _workspace.ManualOffline, paused = _workspace.Paused,
             connectionStatus = _workspace.ConnectionStatus, dataDirectory = _files.DataRoot,
             settings = _workspace.Settings, networkCost = _workspace.NetworkCost

@@ -13,23 +13,33 @@ public sealed class InteractionTests
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     [Fact]
-    public async Task Entering_directory_lists_one_level_and_persists_it()
+    public async Task Current_directory_relists_while_other_branches_use_persisted_entries()
     {
         await using var f = await Fixture.CreateAsync();
         f.Cloud.Items[90] = new(90, 2, "nested", true, [], DateTime.UtcNow);
         f.Cloud.Items[91] = new(91, 90, "deeper", true, [], DateTime.UtcNow);
         var folder = f.Remote(2);
         Assert.Null(folder.LastListed);
-        await f.Workspace.BrowseAsync(folder.Id, probeSizes: false);
+        var calls = f.Cloud.ListCalls;
+        await f.Workspace.BrowseAsync(folder.Id, probeSizes: false, onlyIfUnlisted: true);
+        Assert.Equal(calls + 1, f.Cloud.ListCalls);
         var nested = f.Remote(90);
         Assert.NotNull(f.Workspace.Store.GetEntry(folder.Id)!.LastListed);
         Assert.Null(nested.LastListed);
         Assert.DoesNotContain(f.Workspace.Store.Entries(f.Account.Id), entry => entry.RemoteId == 91);
 
-        await f.Workspace.BrowseAsync(nested.Id, probeSizes: false);
+        calls = f.Cloud.ListCalls;
+        await f.Workspace.BrowseAsync(folder.Id, force: true, probeSizes: false);
+        Assert.Equal(calls + 1, f.Cloud.ListCalls);
+        Assert.Null(nested.LastListed);
+
+        await f.Workspace.BrowseAsync(nested.Id, probeSizes: false, onlyIfUnlisted: true);
+        calls = f.Cloud.ListCalls;
         var deeper = f.Remote(91);
         Assert.Equal(nested.Id, deeper.ParentId);
         Assert.NotNull(f.Workspace.Store.GetEntry(nested.Id)!.LastListed);
+        await f.Workspace.BrowseAsync(nested.Id, probeSizes: false, onlyIfUnlisted: true);
+        Assert.Equal(calls, f.Cloud.ListCalls);
         await f.ReopenAsync();
         Assert.NotNull(f.Workspace.Store.GetEntry(folder.Id)!.LastListed);
         Assert.NotNull(f.Workspace.Store.GetEntry(nested.Id)!.LastListed);

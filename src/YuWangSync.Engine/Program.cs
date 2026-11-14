@@ -47,6 +47,10 @@ public sealed class EngineHost : IAsyncDisposable
     private string? _loginPassword;
     private Guid? _folder;
     private readonly object _stateLock = new(), _logLock = new();
+    private readonly object _enumerationLock = new();
+    private CancellationTokenSource? _enumerationStop;
+    private Task? _enumerationTask;
+    private bool _initialEnumerationPending;
     private readonly Timer _stateTimer;
     private bool _running, _disposed;
     private long _lastProgress;
@@ -91,18 +95,31 @@ public sealed class EngineHost : IAsyncDisposable
             await _workspace.CompleteLoginAsync(account, "", _workspace.CreateLoginClient(account, ""));
         }
         else if ((_workspace.Store.Accounts().FirstOrDefault(a => a.Id == _workspace.Store.ActiveAccountId) ?? _workspace.Store.Accounts().FirstOrDefault()) is { } account)
-            await _workspace.ActivateAsync(account);
-        await LoadAccountAsync();
+            await _workspace.ActivateAsync(account, _done.Token, reconnect: false);
+        await LoadAccountAsync(deferEnumeration: !_demo);
     }
-    private async Task LoadAccountAsync()
+    private async Task LoadAccountAsync(bool deferEnumeration = false)
     {
-        if (!_workspace.Offline)
-            try { await _workspace.RefreshTreeAsync(_done.Token); } catch (IOException) { }
-        if (_workspace.ActiveAccount is { } account && _workspace.ProjectedEntries(account.Id, e => e.IsDiskRoot).FirstOrDefault() is { } root)
+        CancelBackgroundEnumeration();
+        SetCurrentFolderFromCache();
+        if (deferEnumeration) { _initialEnumerationPending = true; return; }
+        if (_demo && !_running)
         {
-            lock (_stateLock) _folder = root.Id;
-            try { await _workspace.BrowseAsync(root.Id, ct: _done.Token, probePermission: true); } catch (IOException) { }
+            if (!_workspace.Offline)
+                try { await _workspace.RefreshTreeAsync(_done.Token); } catch (IOException) { }
+            SetCurrentFolderFromCache();
+            if (_folder is { } root)
+                try { await _workspace.BrowseAsync(root, force: true, ct: _done.Token, probePermission: true); } catch (IOException) { }
+            return;
         }
+        StartBackgroundEnumeration();
+    }
+    private void SetCurrentFolderFromCache()
+    {
+        var root = _workspace.ActiveAccount is { } account
+            ? _workspace.ProjectedEntries(account.Id, e => e.IsDiskRoot).FirstOrDefault()
+            : null;
+        lock (_stateLock) _folder = root?.Id;
     }
     public object State()
     {
@@ -142,6 +159,7 @@ public sealed class EngineHost : IAsyncDisposable
     public async Task RunAsync()
     {
         _running = true; _workspace.Start(); await SendStateSafelyAsync();
+        if (_initialEnumerationPending) { _initialEnumerationPending = false; StartBackgroundEnumeration(); }
         var requests = new HashSet<Task>();
         try
         {
@@ -154,7 +172,11 @@ public sealed class EngineHost : IAsyncDisposable
             }
         }
         catch (OperationCanceledException) when (_done.IsCancellationRequested) { }
-        finally { _done.Cancel(); _transfer?.Cancel(); _loginStop?.Cancel(); await Task.WhenAll(requests); }
+        finally
+        {
+            _done.Cancel(); _transfer?.Cancel(); _loginStop?.Cancel(); CancelBackgroundEnumeration();
+            await Task.WhenAll(requests); await StopBackgroundEnumerationAsync();
+        }
     }
     private async Task HandleLineAsync(string line)
     {
@@ -189,6 +211,7 @@ public sealed class EngineHost : IAsyncDisposable
         {
             case "state": return State();
             case "activate":
+                CancelBackgroundEnumeration();
                 await _workspace.ActivateAsync(_workspace.Store.Accounts().Single(a => a.Id == Id(p, "accountId")), _done.Token);
                 lock (_stateLock) _folder = null; await LoadAccountAsync(); return State();
             case "beginLogin": return await BeginLoginAsync(p);
@@ -206,19 +229,22 @@ public sealed class EngineHost : IAsyncDisposable
             // Navigation replies carry no state: the state event sent after every
             // request already does, and a second full snapshot doubles client parsing.
             case "browse":
+                CancelBackgroundEnumeration();
                 var folder = Id(p, "folderId"); lock (_stateLock) _folder = folder;
                 // The previous folder's size probes must not hold network slots during this listing.
                 StopSizeProbes();
                 // Show cached children immediately while this directory is refreshed.
                 if (_workspace.Store.GetEntry(folder)?.LastListed is not null) await SendStateSafelyAsync();
-                await _workspace.BrowseAsync(folder, Flag(p, "force"), _done.Token, probeSizes: false, probePermission: true);
+                await _workspace.BrowseAsync(folder, force: true, ct: _done.Token, probeSizes: false, probePermission: true);
                 ProbeSizesInBackground(folder); return new { };
             case "loadFolder":
-                await _workspace.BrowseAsync(Id(p, "folderId"), ct: _done.Token, probeSizes: false, probePermission: true); return new { };
+                CancelBackgroundEnumeration();
+                await _workspace.BrowseAsync(Id(p, "folderId"), ct: _done.Token, probeSizes: false, onlyIfUnlisted: true); return new { };
             case "refresh":
                 if (_workspace.Offline && !_workspace.ManualOffline) await _workspace.ReconnectAsync(_done.Token);
                 Guid? current; lock (_stateLock) current = _folder;
-                if (current is { } root) { await _workspace.BrowseAsync(root, true, _done.Token, probeSizes: false, probePermission: true); ProbeSizesInBackground(root); }
+                if (current is { } root) { await _workspace.BrowseAsync(root, true, _done.Token, probeSizes: false,
+                    probePermission: true, forcePermissionProbe: true); ProbeSizesInBackground(root); }
                 else await _workspace.RefreshTreeAsync(_done.Token);
                 return new { };
             case "open":
@@ -276,6 +302,55 @@ public sealed class EngineHost : IAsyncDisposable
         lock (_stateLock) { previous = _sizeStop; _sizeStop = null; }
         previous?.Cancel();
     }
+    private void StartBackgroundEnumeration()
+    {
+        if (_workspace.ActiveAccount is not { } account) return;
+        lock (_enumerationLock)
+        {
+            _enumerationStop?.Cancel();
+            var stop = CancellationTokenSource.CreateLinkedTokenSource(_done.Token);
+            _enumerationStop = stop;
+            _enumerationTask = Task.Run(() => RefreshAccountInBackgroundAsync(account.Id, stop.Token));
+        }
+    }
+    private void CancelBackgroundEnumeration()
+    {
+        lock (_enumerationLock) _enumerationStop?.Cancel();
+    }
+    private async Task StopBackgroundEnumerationAsync()
+    {
+        Task? task;
+        lock (_enumerationLock) { _enumerationStop?.Cancel(); task = _enumerationTask; }
+        if (task is not null)
+            try { await task; } catch (OperationCanceledException) { }
+    }
+    private async Task RefreshAccountInBackgroundAsync(Guid accountId, CancellationToken ct)
+    {
+        try
+        {
+            if (_workspace.Offline) await _workspace.ReconnectAsync(ct, lowPriority: true);
+            ct.ThrowIfCancellationRequested();
+            if (_workspace.Offline || _workspace.ManualOffline || _workspace.ActiveAccount?.Id != accountId) return;
+            await _workspace.RefreshTreeAsync(ct, lowPriority: true);
+            ct.ThrowIfCancellationRequested();
+            var root = _workspace.ProjectedEntries(accountId, e => e.IsDiskRoot).FirstOrDefault();
+            if (root is null) return;
+            Guid? current;
+            lock (_stateLock)
+            {
+                var currentEntry = _folder is { } id ? _workspace.Store.GetEntry(id) : null;
+                if (currentEntry is null || currentEntry.AccountId != accountId || currentEntry.IsDiskRoot) _folder = root.Id;
+                current = _folder;
+            }
+            if (current != root.Id) return;
+            await _workspace.BrowseAsync(root.Id, force: true, ct: ct, probeSizes: false, probePermission: true, lowPriority: true);
+            ct.ThrowIfCancellationRequested();
+            lock (_stateLock) current = _folder;
+            if (current == root.Id) ProbeSizesInBackground(root.Id);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { _workspace.Log?.Invoke("启动目录刷新暂未完成：" + error.Message); }
+    }
     // Real sizes need one direct-link probe per file. Run them after the listing is
     // returned so entering a folder is not held up; leaving the folder cancels them.
     private void ProbeSizesInBackground(Guid folder)
@@ -330,6 +405,7 @@ public sealed class EngineHost : IAsyncDisposable
     {
         if (_disposed) return; _disposed = true; _running = false; _stateTimer.Dispose();
         _workspace.Changed -= ScheduleState; _transfer?.Cancel(); _loginStop?.Cancel(); _sizeStop?.Cancel(); _login?.Dispose();
+        await StopBackgroundEnumerationAsync();
         await _workspace.DisposeAsync();
     }
 }

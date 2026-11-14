@@ -13,6 +13,7 @@ public sealed partial class Workspace : IAsyncDisposable
     private readonly Func<Account, string, ICloudClient> _factory;
     private const int CloudConcurrency = 6;
     private readonly SemaphoreSlim _network = new(CloudConcurrency, CloudConcurrency);
+    private readonly SemaphoreSlim _backgroundCloud = new(1, 1);
     private readonly SemaphoreSlim _accountChanges = new(1, 1), _execution = new(1, 1);
     private readonly List<CancellationTokenSource> _retiredAccounts = [];
     private readonly object _metadataGate = new();
@@ -100,7 +101,7 @@ public sealed partial class Workspace : IAsyncDisposable
         Store.SaveAccount(account);
         await ActivateClientAsync(account, client, true, ct);
     }
-    public async Task ActivateAsync(Account account, CancellationToken ct = default)
+    public async Task ActivateAsync(Account account, CancellationToken ct = default, bool reconnect = true)
     {
         string password; string? session;
         try
@@ -116,7 +117,7 @@ public sealed partial class Workspace : IAsyncDisposable
         var client = _factory(account, password);
         client.SetSession(session);
         await ActivateClientAsync(account, client, false, ct);
-        await ReconnectAsync(ct);
+        if (reconnect) await ReconnectAsync(ct);
     }
     private async Task ActivateClientAsync(Account account, ICloudClient client, bool online, CancellationToken ct)
     {
@@ -166,14 +167,14 @@ public sealed partial class Workspace : IAsyncDisposable
     public void SetPaused(bool value) { Paused = value; if (value) _currentStop?.Cancel(); Notify(); }
     public void SetManualOffline(bool value)
     { ManualOffline = value; if (value) { Offline = true; _currentStop?.Cancel(); ConnectionStatus = "离线模式"; } Notify(); }
-    public async Task ReconnectAsync(CancellationToken ct = default)
+    public async Task ReconnectAsync(CancellationToken ct = default, bool lowPriority = false)
     {
         if (ManualOffline || _client is null || ActiveAccount is not { } currentAccount) return;
         if (_credentialsUnavailable && ActiveAccount is { } account) { await ActivateAsync(account, ct); return; }
         var generation = _accountStop;
         try
         {
-            var valid = await WithCloudAsync(currentAccount.Id, (c, t) => c.CheckSessionAsync(t), ct, allowOffline: true);
+            var valid = await WithCloudAsync(currentAccount.Id, (c, t) => c.CheckSessionAsync(t), ct, allowOffline: true, lowPriority: lowPriority);
             if (generation != _accountStop || generation.IsCancellationRequested || ManualOffline) return;
             Offline = !valid; ConnectionStatus = valid ? "在线" : "无法复用会话，请重新登录或稍后重连";
         }
@@ -182,14 +183,27 @@ public sealed partial class Workspace : IAsyncDisposable
         Notify();
     }
     private async Task<T> WithCloudAsync<T>(Guid account, Func<ICloudClient, CancellationToken, Task<T>> action, CancellationToken ct,
-        bool allowOffline = false, bool markOffline = true)
+        bool allowOffline = false, bool markOffline = true, bool lowPriority = false)
     {
         if (account != ActiveAccount?.Id || _client is null || ManualOffline || Offline && !allowOffline) throw new IOException("当前离线，操作已保留在本地。");
         var generation = _accountStop;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, generation.Token, _stop.Token);
-        await _network.WaitAsync(linked.Token);
+        var acquired = false;
+        if (lowPriority) await _backgroundCloud.WaitAsync(linked.Token);
         try
         {
+            if (lowPriority)
+            {
+                // Background listings never queue ahead of foreground cloud work.
+                while (!linked.IsCancellationRequested && !(_network.CurrentCount > 1 && (acquired = _network.Wait(0))))
+                    await Task.Delay(40, linked.Token);
+                linked.Token.ThrowIfCancellationRequested();
+            }
+            else
+            {
+                await _network.WaitAsync(linked.Token);
+                acquired = true;
+            }
             if (account != ActiveAccount?.Id || _client is null || generation != _accountStop) throw new OperationCanceledException();
             var result = await action(_client, linked.Token);
             linked.Token.ThrowIfCancellationRequested();
@@ -197,12 +211,16 @@ public sealed partial class Workspace : IAsyncDisposable
         }
         catch (HttpRequestException)
         { if (markOffline && generation == _accountStop) { Offline = true; ConnectionStatus = "连接中断，待办已保留"; } throw; }
-        finally { _network.Release(); }
+        finally
+        {
+            if (acquired) _network.Release();
+            if (lowPriority) _backgroundCloud.Release();
+        }
     }
-    public async Task RefreshTreeAsync(CancellationToken ct = default)
+    public async Task RefreshTreeAsync(CancellationToken ct = default, bool lowPriority = false)
     {
         var account = ActiveAccount ?? throw new InvalidOperationException("请先选择账号。");
-        var tree = await WithCloudAsync(account.Id, (c, t) => c.TreeAsync(t), ct);
+        var tree = await WithCloudAsync(account.Id, (c, t) => c.TreeAsync(t), ct, lowPriority: lowPriority);
         var existing = Store.Entries(account.Id);
         var roots = tree.Where(n => n.IsDisk).Select(n =>
         {
@@ -245,7 +263,7 @@ public sealed partial class Workspace : IAsyncDisposable
     }
     public IReadOnlyList<Entry> Children(Guid parent) => ActiveAccount is { } a ? ProjectedEntries(a.Id, e => e.ParentId == parent) : [];
     public async Task BrowseAsync(Guid parentId, bool force = false, CancellationToken ct = default,
-        bool probeSizes = true, bool probePermission = false)
+        bool probeSizes = true, bool probePermission = false, bool onlyIfUnlisted = false, bool forcePermissionProbe = false, bool lowPriority = false)
     {
         var gate = _directoryLocks.GetOrAdd(parentId, _ => new(1, 1));
         await gate.WaitAsync(ct);
@@ -254,15 +272,15 @@ public sealed partial class Workspace : IAsyncDisposable
             var parent = Store.GetEntry(parentId) ?? throw new IOException("目录不存在。");
             if (!parent.IsDirectory || parent.RemoteId == 0 && !parent.IsDiskRoot) return;
             if (Offline || ManualOffline) { Notify(); return; }
-            var refreshListing = force || parent.LastListed is not { } listed || DateTimeOffset.UtcNow - listed >= TimeSpan.FromMinutes(30);
-            // Permission is durable metadata. Probe it lazily for a new directory, or
-            // when the user explicitly refreshes; ordinary cached opens reuse the value.
-            var shouldProbePermission = probePermission && (force || parent.Permission == DirectoryPermission.Unknown);
+            var refreshListing = force || parent.LastListed is not { } listed
+                || !onlyIfUnlisted && DateTimeOffset.UtcNow - listed >= TimeSpan.FromMinutes(30);
+            // Refreshing a directory listing does not invalidate its persisted permission.
+            var shouldProbePermission = probePermission && (forcePermissionProbe || parent.Permission == DirectoryPermission.Unknown);
             if (refreshListing)
             {
                 var result = await WithCloudAsync(parent.AccountId, (c, t) => shouldProbePermission
                     ? c.ListWithPermissionAsync(parent.DiskId, parent.RemoteId, t)
-                    : c.ListAsync(parent.DiskId, parent.RemoteId, t), ct);
+                    : c.ListAsync(parent.DiskId, parent.RemoteId, t), ct, lowPriority: lowPriority);
                 ApplyListing(parent, result, shouldProbePermission); Notify();
             }
             else if (shouldProbePermission)

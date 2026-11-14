@@ -58,7 +58,7 @@ jobs:
         run: bash tools/prepare-macos-signing.sh
       - name: Build self-contained application
         env:
-          YUWANG_DMG_PREVIEW: '1'
+          YUWANG_DMG_CAPTURE: '1'
         run: bash tools/package-macos.sh
       - name: Prepare signed Keychain upgrade fixture
         run: python3 tools/verify-keychain-signing.py prepare
@@ -109,12 +109,12 @@ jobs:
       - uses: actions/upload-artifact@v7.0.2
         if: success()
         with:
-          name: macos-arm64-preview
+          name: macos-arm64-build
           path: |
-            artifacts/YuWangSync-macOS-arm64-preview.zip
-            artifacts/YuWangSync-macOS-arm64-preview.zip.sha256
-            artifacts/YuWangSync-macOS-arm64-preview.dmg
-            artifacts/YuWangSync-macOS-arm64-preview.dmg.sha256
+            artifacts/YuWangSync-macOS-arm64-1.0.0.zip
+            artifacts/YuWangSync-macOS-arm64-1.0.0.zip.sha256
+            artifacts/YuWangSync-macOS-arm64-1.0.0.dmg
+            artifacts/YuWangSync-macOS-arm64-1.0.0.dmg.sha256
           retention-days: 7
       - name: Remove runner signing keychain
         if: always()

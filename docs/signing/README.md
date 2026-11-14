@@ -1,4 +1,4 @@
-# 预览签名与钥匙串
+# 仓库签名与钥匙串
 
 主仓库使用长期复用的仓库专用自签名证书。公开证书为 `preview-signing.pem`；私钥不进入 Git，使用加密 PKCS#12 存储，导出密码由 Windows 当前用户 DPAPI 保护，保存在维护者本机的 `.codex/signing/YuWangSync-macOS/`。Actions 通过两个仓库 Secrets 导入临时钥匙串：
 

@@ -3,6 +3,12 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo 'Requires an Apple Silicon Mac.' >&2; exit 1; }
+source_version="$(sed -n 's/^[[:space:]]*<Version>\([^<]*\)<\/Version>.*/\1/p' Directory.Build.props | head -n1)"
+release_version="${YUWANG_RELEASE_VERSION:-$source_version}"
+product_version="$(sed -n 's/.*ProductVersion.Current = "\([^"]*\)".*/\1/p' src/YuWangSync.Core/Protocol/ProductIdentity.cs | head -n1)"
+[[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$release_version" == "$source_version" && "$product_version" == "$source_version" ]] || {
+  echo 'The configured, assembly, and product versions must match the stable x.y.z source version.' >&2; exit 1;
+}
 mkdir -p "$root/artifacts/package"
 work="$(mktemp -d "$root/artifacts/package-build.XXXXXX")"
 app="$root/artifacts/package/YuWangSync.app"
@@ -20,7 +26,7 @@ fi
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macos14.0 \
   -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
   "$root"/native/app/*.swift -o "$app/Contents/MacOS/YuWangSync"
-cat > "$app/Contents/Info.plist" <<'PLIST'
+cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -29,9 +35,9 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>育网云</string>
 <key>CFBundleExecutable</key><string>YuWangSync</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>3</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>YuWangReleaseVersion</key><string>0.1.0-preview.3</string>
+<key>CFBundleVersion</key><string>$release_version</string>
+<key>CFBundleShortVersionString</key><string>$release_version</string>
+<key>YuWangReleaseVersion</key><string>$release_version</string>
 <key>CFBundleIconFile</key><string>app.icns</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
@@ -52,8 +58,9 @@ bash "$root/tools/sign-macos.sh" "$app/Contents/MacOS/YuWangSync" io.github.TOBY
 bash "$root/tools/sign-macos.sh" "$app" io.github.TOBYmiz.YuWangSync-macOS
 codesign --verify --deep --strict "$app"
 plutil -lint "$app/Contents/Info.plist"
-ditto -c -k --sequesterRsrc --keepParent "$app" "$root/artifacts/YuWangSync-macOS-arm64-preview.zip"
-(cd "$root/artifacts" && shasum -a 256 YuWangSync-macOS-arm64-preview.zip > YuWangSync-macOS-arm64-preview.zip.sha256)
+zip="$root/artifacts/YuWangSync-macOS-arm64-$release_version.zip"
+ditto -c -k --sequesterRsrc --keepParent "$app" "$zip"
+(cd "$root/artifacts" && shasum -a 256 "$(basename "$zip")" > "$(basename "$zip").sha256")
 image_root="$work/dmg-root"
 mkdir -p "$image_root"
 ditto "$app" "$image_root/YuWangSync.app"
@@ -61,7 +68,7 @@ ln -s /Applications "$image_root/Applications"
 cat > "$image_root/安装说明.txt" <<'INSTALL'
 将 YuWangSync.app 拖入 Applications 即可安装。
 适用 macOS 14+、Apple Silicon。应用自带运行时。
-此版本为预览版，尚未完成 Developer ID 签名与 Apple 公证。
+此应用尚未完成 Developer ID 签名与 Apple 公证；首次打开时 macOS 可能显示 Gatekeeper 提示。
 
 更新前请通过 ⌘Q 或菜单栏“退出育网云”完全退出应用，再替换 Applications 中的旧版本。
 关闭主窗口不会退出后台进程。
@@ -72,7 +79,7 @@ xcrun swiftc -swift-version 5 -O -target arm64-apple-macos14.0 \
 python3 -m venv "$work/dmg-tools"
 dmg_python="$work/dmg-tools/bin/python3"
 "$dmg_python" -m pip --disable-pip-version-check install --require-hashes -r "$root/tools/requirements-dmg.txt"
-dmg="$root/artifacts/YuWangSync-macOS-arm64-preview.dmg"
+dmg="$root/artifacts/YuWangSync-macOS-arm64-$release_version.dmg"
 mount="$work/dmg-mount"
 mkdir -p "$mount"
 hdiutil create -ov -volname "育网云" -srcfolder "$image_root" -format UDRW -fs HFS+ "$work/layout.dmg"
@@ -89,10 +96,10 @@ codesign --verify --deep --strict "$mount/YuWangSync.app"
 test "$(readlink "$mount/Applications")" = /Applications
 diff -qr "$app" "$mount/YuWangSync.app"
 "$dmg_python" "$root/tools/dmg-layout.py" verify "$mount"
-if [[ "${YUWANG_DMG_PREVIEW:-0}" == 1 ]]; then
+if [[ "${YUWANG_DMG_CAPTURE:-0}" == 1 ]]; then
   "$work/dmg-artwork" capture "$mount" "$root/artifacts/ui-dmg-macos.png"
 fi
 hdiutil detach "$mount"
 trap - EXIT
-(cd "$root/artifacts" && shasum -a 256 YuWangSync-macOS-arm64-preview.dmg > YuWangSync-macOS-arm64-preview.dmg.sha256)
+(cd "$root/artifacts" && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256")
 echo "Created $app"

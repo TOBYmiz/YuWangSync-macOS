@@ -2,7 +2,7 @@
 
 独立的 macOS 原生客户端，目标为 macOS 14+、Apple Silicon。界面使用 SwiftUI / AppKit 系统控件，协议、缓存和持久离线队列使用 C# / .NET 10。Windows 用于开发和测试后台引擎，原生界面由 Mac 构建。
 
-这是预览实现。构建和自动测试的结果见 GitHub Actions；macOS 14 真机、Office 编辑、Finder/拖放及真实内网写操作的验收边界见 [验证清单](docs/VALIDATION.md)。
+这是 YuWangSync macOS 1.0.0 首次公开发行版。构建和自动测试的结果见 GitHub Actions；macOS 14 真机、Office 编辑、Finder/拖放及真实内网写操作的验收边界见 [验证清单](docs/VALIDATION.md)。
 
 ## 功能
 
@@ -37,7 +37,7 @@ Mac 构建需要包含 SwiftUI SDK 的 Xcode / Apple 命令行工具，用于编
 bash tools/package-macos.sh
 ```
 
-输出同时包含 `artifacts/YuWangSync-macOS-arm64-preview.zip` 和 `.dmg`，各有 SHA-256 校验文件。ZIP 内为 `.app`；DMG 内提供应用与 Applications 链接，可拖入安装。其中 `.app` 自带 .NET 运行时；主仓库 CI 使用长期复用的自签名证书，尚未做 Developer ID 签名与 Apple 公证。未配置签名密钥的本地或外部分支构建回退为 ad-hoc 签名。GitHub Actions 使用标准 Windows 和 ARM64 Mac runner，产物保留七天，不自动发布 Release。签名与钥匙串更新规则见 [预览签名](docs/signing/README.md)。
+输出同时包含 `artifacts/YuWangSync-macOS-arm64-1.0.0.zip` 和 `.dmg`，各有 SHA-256 校验文件。ZIP 内为 `.app`；DMG 内提供应用与 Applications 链接，可拖入安装。其中 `.app` 自带 .NET 运行时；主仓库 CI 使用长期复用的自签名证书，尚未做 Developer ID 签名与 Apple 公证。未配置签名密钥的本地或外部分支构建回退为 ad-hoc 签名。普通推送只运行 CI；独立的 `Release macOS` 手动 Action 接受每次运行的版本、标题、说明和预发布配置，完成 Windows、macOS 与钥匙串验证后才创建 Release。签名与钥匙串更新规则见 [仓库签名](docs/signing/README.md)。
 
 关于页显示作者 TOBYmiz 及开源许可列表，完整声明随应用提供；来源见 [开源组件](docs/THIRD-PARTY-NOTICES.md)。
 

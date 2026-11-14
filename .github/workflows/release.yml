@@ -1,0 +1,212 @@
+name: Release macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version; must match the versions in the checked-out source.
+        required: true
+        default: '1.0.0'
+        type: string
+      title:
+        description: GitHub Release title.
+        required: true
+        default: 'YuWangSync macOS 1.0.0'
+        type: string
+      notes:
+        description: Markdown release notes. Leave empty to use docs/releases/<version>.md.
+        required: false
+        default: ''
+        type: string
+      prerelease:
+        description: Mark this GitHub Release as a pre-release.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.401'
+          cache: true
+          cache-dependency-path: '**/packages*.lock.json'
+      - run: dotnet restore YuWangSync.slnx --locked-mode
+      - run: dotnet test YuWangSync.slnx -c Release --no-restore --logger "trx;LogFileName=windows-release.trx" --results-directory artifacts/tests
+      - name: Engine and Windows adapter smoke tests
+        shell: pwsh
+        run: |
+          dotnet src/YuWangSync.Engine/bin/Release/net10.0/YuWangSync.Engine.dll --smoke-test --output artifacts/engine-windows.json
+          if ($LASTEXITCODE -ne 0) { throw 'Engine smoke failed' }
+          dotnet src/YuWangSync.Engine/bin/Release/net10.0/YuWangSync.Engine.dll --platform-selftest --output artifacts/platform-windows.json
+          if ($LASTEXITCODE -ne 0) { throw 'Platform smoke failed' }
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Require Apple Silicon
+        run: test "$(uname -m)" = arm64
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.401'
+          cache: true
+          cache-dependency-path: '**/packages*.lock.json'
+      - run: dotnet restore YuWangSync.slnx --locked-mode
+      - name: Validate configured version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys, xml.etree.ElementTree as ET
+          props = ET.parse('Directory.Build.props').getroot()
+          source_version = props.findtext('.//Version')
+          product_source = pathlib.Path('src/YuWangSync.Core/Protocol/ProductIdentity.cs').read_text(encoding='utf-8')
+          match = re.search(r'ProductVersion\.Current\s*=\s*"([^"]+)"', product_source)
+          configured = __import__('os').environ['RELEASE_VERSION']
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', configured):
+              sys.exit('Release version must use x.y.z format.')
+          if configured != source_version or not match or match.group(1) != source_version:
+              sys.exit(f'Configured version {configured} must match source versions {source_version} and {match.group(1) if match else "missing"}.')
+          PY
+      - name: Load persistent macOS signing identity
+        env:
+          YUWANG_REQUIRE_SIGNING: '1'
+          MACOS_SIGNING_CERTIFICATE_P12: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: bash tools/prepare-macos-signing.sh
+      - name: Build and package self-contained application
+        env:
+          YUWANG_DMG_CAPTURE: '1'
+          YUWANG_RELEASE_VERSION: ${{ inputs.version }}
+        run: bash tools/package-macos.sh
+      - name: Prepare signed Keychain upgrade fixture
+        run: python3 tools/verify-keychain-signing.py prepare
+      - name: Keychain and coordinated-file smoke test
+        timeout-minutes: 3
+        run: artifacts/package/YuWangSync.app/Contents/MacOS/Engine/YuWangSync.Engine --platform-selftest --output artifacts/platform-macos.json
+      - name: Packaged engine smoke test
+        run: artifacts/package/YuWangSync.app/Contents/MacOS/Engine/YuWangSync.Engine --smoke-test --output artifacts/engine-macos.json
+      - name: Launch application bundle with synthetic data
+        timeout-minutes: 3
+        run: |
+          open -n --stdout "$PWD/artifacts/ui-macos-stdout.log" --stderr "$PWD/artifacts/ui-macos-stderr.log" artifacts/package/YuWangSync.app --args --ui-selftest --output "$PWD/artifacts/ui-macos.json"
+          for attempt in {1..75}; do
+            test -f artifacts/ui-macos.json && break
+            if (( attempt > 5 )) && ! pgrep -x YuWangSync >/dev/null; then break; fi
+            sleep 1
+          done
+          if ! test -f artifacts/ui-macos.json; then
+            if pid="$(pgrep -x YuWangSync)"; then sample "$pid" 1 -file artifacts/ui-macos-sample.log || true; fi
+            python3 - <<'PY'
+          import pathlib, shutil
+          for report in (pathlib.Path.home() / 'Library/Logs/DiagnosticReports').glob('YuWangSync*.ips'):
+              shutil.copy2(report, pathlib.Path('artifacts') / ('crash-macos-' + report.name))
+          PY
+          fi
+          for diagnostic in artifacts/ui-macos*.log; do
+            if test -f "$diagnostic"; then echo "--- $diagnostic"; cat "$diagnostic"; fi
+          done
+          ps -ax -o pid,command | grep '[Y]uWangSync' || true
+          python3 -c 'import json; assert json.load(open("artifacts/ui-macos.json"))["passed"]'
+          for attempt in {1..5}; do
+            pgrep -x YuWangSync >/dev/null || break
+            sleep 1
+          done
+          if pgrep -x YuWangSync >/dev/null; then echo 'Native app did not exit after its self-test.' >&2; exit 1; fi
+      - run: dotnet test YuWangSync.slnx -c Release --no-restore --logger "trx;LogFileName=macos-release.trx" --results-directory artifacts/tests
+      - uses: actions/upload-artifact@v7.0.2
+        if: success()
+        with:
+          name: macos-release
+          path: |
+            artifacts/YuWangSync-macOS-arm64-${{ inputs.version }}.zip
+            artifacts/YuWangSync-macOS-arm64-${{ inputs.version }}.zip.sha256
+            artifacts/YuWangSync-macOS-arm64-${{ inputs.version }}.dmg
+            artifacts/YuWangSync-macOS-arm64-${{ inputs.version }}.dmg.sha256
+          retention-days: 1
+      - uses: actions/upload-artifact@v7.0.2
+        if: success()
+        with:
+          name: macos-keychain-probe
+          path: artifacts/keychain-probe.zip
+          retention-days: 1
+      - name: Remove runner signing keychain
+        if: always()
+        run: |
+          keychain="${YUWANG_SIGNING_KEYCHAIN:-$RUNNER_TEMP/yuwang-signing/signing.keychain-db}"
+          if test -f "$keychain"; then security delete-keychain "$keychain"; fi
+
+  macos-keychain:
+    needs: macos
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: macos-keychain-probe
+          path: artifacts
+      - name: Check Keychain on a fresh Mac without signing identity or certificate trust
+        run: |
+          ditto -x -k artifacts/keychain-probe.zip artifacts
+          python3 tools/verify-keychain-signing.py verify
+
+  publish:
+    needs: [windows, macos, macos-keychain]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: macos-release
+          path: artifacts/release
+      - name: Create configured GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TITLE: ${{ inputs.title }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          if git ls-remote --exit-code origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists; refusing to replace an existing release." >&2
+            exit 1
+          fi
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          if [[ -n "$RELEASE_NOTES" ]]; then
+            printf '%s\n' "$RELEASE_NOTES" > "$notes_file"
+          else
+            notes_file="docs/releases/$RELEASE_VERSION.md"
+            test -f "$notes_file" || { echo "No notes supplied and $notes_file does not exist." >&2; exit 1; }
+          fi
+          args=(release create "$tag"
+            "artifacts/release/YuWangSync-macOS-arm64-$RELEASE_VERSION.zip"
+            "artifacts/release/YuWangSync-macOS-arm64-$RELEASE_VERSION.zip.sha256"
+            "artifacts/release/YuWangSync-macOS-arm64-$RELEASE_VERSION.dmg"
+            "artifacts/release/YuWangSync-macOS-arm64-$RELEASE_VERSION.dmg.sha256"
+            --target "$GITHUB_SHA"
+            --title "$RELEASE_TITLE"
+            --notes-file "$notes_file")
+          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then args+=(--prerelease); fi
+          gh "${args[@]}"

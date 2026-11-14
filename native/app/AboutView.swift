@@ -13,7 +13,7 @@ struct AboutView: View {
                 Image(nsImage: NSApplication.shared.applicationIconImage).resizable().frame(width: 64, height: 64)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("育网云 macOS").font(.title2.bold())
-                    Text(Bundle.main.object(forInfoDictionaryKey: "YuWangReleaseVersion") as? String ?? "0.1.0-preview.3").foregroundStyle(.secondary)
+                    Text(Bundle.main.object(forInfoDictionaryKey: "YuWangReleaseVersion") as? String ?? "1.0.0").foregroundStyle(.secondary)
                     Text("作者：TOBYmiz")
                 }
                 Spacer()

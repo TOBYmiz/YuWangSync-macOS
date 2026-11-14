@@ -549,8 +549,9 @@ struct SettingsView: View {
                 Button("打开数据目录") { if let path = model.state?.dataDirectory { NSWorkspace.shared.open(URL(fileURLWithPath: path)) } }
             }
             Section("关于") {
-                LabeledContent("版本", value: model.state?.version ?? "0.1.0-preview.3")
-                Text("预览版：部分功能仍在验证中，重要文件请保留备份。").font(.caption).foregroundStyle(.secondary)
+                LabeledContent("版本", value: model.state?.version ?? "1.0.0")
+                Text("部分 macOS 系统行为和真实服务器场景仍待独立验收；重要文件请保留备份。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped).padding().frame(width: 540, height: 720)
     }

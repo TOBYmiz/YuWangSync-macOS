@@ -2,7 +2,7 @@
 
 | 组件 | 发布包中的版本 | 许可与来源 |
 | --- | --- | --- |
-| YuWangSync-macOS | 0.1.0-preview.3 | MIT；Copyright (c) 2026 TOBYmiz；见根目录 LICENSE |
+| YuWangSync-macOS | 1.0.0 | MIT；Copyright (c) 2026 TOBYmiz；见根目录 LICENSE |
 | .NET Runtime | 按固定 SDK 解析的 osx-arm64 runtime pack（当前 10.0.12） | MIT；.NET Foundation and Contributors；运行时自身的完整第三方声明一并打包 |
 | Microsoft.Data.Sqlite / Microsoft.Data.Sqlite.Core | 10.0.14 | MIT；.NET Foundation and Contributors；https://github.com/dotnet/efcore |
 | SQLitePCLRaw（core、provider、bundle 与 native 包） | 2.1.13 | Apache-2.0；Copyright 2014-2024 SourceGear, LLC；https://github.com/ericsink/SQLitePCL.raw |

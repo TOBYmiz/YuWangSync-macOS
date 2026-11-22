@@ -12,6 +12,8 @@ namespace YuWangSync.Tests;
 public sealed class TestCloud : DemoCloudClient
 {
     public int UploadCalls, DeleteCalls, ListCalls, SizeCalls, HashCalls;
+    public ulong? UnavailableHashId;
+    public System.Collections.Concurrent.ConcurrentQueue<ulong> HashedIds { get; } = new();
     public long? DeclaredSizeOverride;
     public ulong? FailingFolder;
     public bool LoseReply, InvalidListing;
@@ -40,7 +42,11 @@ public sealed class TestCloud : DemoCloudClient
     public override Task<bool> DeleteAsync(ulong disk, ulong parent, ulong id, bool directory, CancellationToken ct)
     { DeleteCalls++; return base.DeleteAsync(disk, parent, id, directory, ct); }
     public override async Task<DownloadReceipt> HashAsync(Entry entry, CancellationToken ct)
-    { Interlocked.Increment(ref HashCalls); if (DuringVerification is { } action) await action(ct); return await base.HashAsync(entry, ct); }
+    {
+        Interlocked.Increment(ref HashCalls); HashedIds.Enqueue(entry.RemoteId);
+        if (entry.RemoteId == UnavailableHashId) throw new IOException("Synthetic unavailable old file download");
+        if (DuringVerification is { } action) await action(ct); return await base.HashAsync(entry, ct);
+    }
 }
 
 public sealed class Fixture : IAsyncDisposable

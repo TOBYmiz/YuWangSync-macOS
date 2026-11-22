@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using Xunit;
+using YuWangCloudSync.Models;
 using YuWangCloudSync.Net;
 using YuWangSync.Core;
 using YuWangSync.Core.Storage;
@@ -11,6 +12,85 @@ namespace YuWangSync.Tests;
 public sealed class InteractionTests
 {
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    [Fact]
+    public async Task Overwrite_choice_returns_without_network_work_and_uploads_when_old_download_is_unavailable()
+    {
+        await using var f = await Fixture.CreateAsync(); var w = f.Workspace;
+        var original = f.Remote(1);
+        var id = (await w.ImportAsync(f.Disk, [f.File(original.Name, "replacement")])).Single();
+        f.Cloud.FailingFolder = 0; f.Cloud.UnavailableHashId = original.RemoteId;
+        var listings = f.Cloud.ListCalls; var sizes = f.Cloud.SizeCalls;
+        await w.ResolveAsync(id, CollisionChoice.Replace).WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(OperationState.Queued, w.Store.GetOperation(id)!.State);
+        Assert.True(w.Store.GetOperation(id)!.OverwriteConfirmed);
+        Assert.Equal(listings, f.Cloud.ListCalls); Assert.Equal(sizes, f.Cloud.SizeCalls);
+        Assert.Equal(0, f.Cloud.HashCalls); Assert.Equal(0, f.Cloud.UploadCalls);
+        f.Cloud.FailingFolder = null;
+        await f.DrainAsync();
+        Assert.Equal(OperationState.Completed, w.Store.GetOperation(id)!.State);
+        Assert.Equal(0, f.Cloud.HashCalls); Assert.Equal(1, f.Cloud.UploadCalls);
+        Assert.DoesNotContain(original.RemoteId, f.Cloud.Items.Keys);
+    }
+
+    [Fact]
+    public async Task Confirmed_overwrite_survives_restart_and_only_verifies_the_new_upload()
+    {
+        await using var f = await Fixture.CreateAsync(); f.Cloud.DeferVerification = true;
+        var w = f.Workspace; var original = f.Remote(1);
+        var id = (await w.ImportAsync(f.Disk, [f.File(original.Name, "replacement")])).Single();
+        await w.ResolveAsync(id, CollisionChoice.Replace);
+        w.SetNetworkCost(NetworkCost.Expensive); f.Cloud.UnavailableHashId = original.RemoteId;
+        await w.RunOnceAsync();
+        var uploaded = w.Store.GetOperation(id)!;
+        Assert.Equal(OperationState.AwaitingVerification, uploaded.State);
+        Assert.Equal(0, f.Cloud.HashCalls); Assert.True(f.Cloud.Items.ContainsKey(original.RemoteId));
+        await f.ReopenAsync(); w = f.Workspace;
+        Assert.True(w.Store.GetOperation(id)!.OverwriteConfirmed);
+        await w.RunOnceAsync();
+        Assert.Equal(OperationState.Completed, w.Store.GetOperation(id)!.State);
+        Assert.Equal([uploaded.NewRemoteId], f.Cloud.HashedIds.ToArray());
+        Assert.Equal(1, f.Cloud.UploadCalls); Assert.DoesNotContain(original.RemoteId, f.Cloud.Items.Keys);
+    }
+
+    [Fact]
+    public async Task Confirmed_overwrite_binds_the_current_same_name_file_before_upload()
+    {
+        await using var f = await Fixture.CreateAsync(); var w = f.Workspace; var original = f.Remote(1);
+        var id = (await w.ImportAsync(f.Disk, [f.File(original.Name, "replacement")])).Single();
+        await w.ResolveAsync(id, CollisionChoice.Replace);
+        f.Cloud.Items.TryRemove(original.RemoteId, out var old);
+        f.Cloud.Items[90] = old! with { Id = 90, Data = [1, 2, 3], Modified = old.Modified.AddMinutes(1) };
+        await w.BrowseAsync(f.Disk, true, probeSizes: false);
+        await f.DrainAsync();
+        Assert.Equal(OperationState.Completed, w.Store.GetOperation(id)!.State);
+        Assert.Equal(90ul, w.Store.GetOperation(id)!.OldRemoteId);
+        Assert.Equal(0, f.Cloud.HashCalls);
+        Assert.Single(w.Children(f.Disk), e => e.Name == original.Name);
+    }
+
+    [Theory]
+    [InlineData("permission")]
+    [InlineData("directory")]
+    [InlineData("duplicate")]
+    [InlineData("missing")]
+    public async Task Confirmed_overwrite_still_blocks_invalid_targets(string problem)
+    {
+        await using var f = await Fixture.CreateAsync(); var w = f.Workspace; var original = f.Remote(1);
+        var id = (await w.ImportAsync(f.Disk, [f.File(original.Name, "replacement")])).Single();
+        await w.ResolveAsync(id, CollisionChoice.Replace);
+        switch (problem)
+        {
+            case "permission": f.Cloud.Permission = DirectoryPermission.ReadOnly; break;
+            case "directory": f.Cloud.Items[1] = f.Cloud.Items[1] with { Directory = true }; break;
+            case "duplicate": f.Cloud.Items[90] = f.Cloud.Items[1] with { Id = 90 }; break;
+            case "missing": f.Cloud.Items.TryRemove(1, out _); break;
+        }
+        await w.RunOnceAsync();
+        Assert.Equal(OperationState.Blocked, w.Store.GetOperation(id)!.State);
+        Assert.False(w.Store.GetOperation(id)!.MutationStarted);
+        Assert.Equal(0, f.Cloud.UploadCalls); Assert.Equal(0, f.Cloud.HashCalls);
+    }
 
     [Fact]
     public async Task Current_directory_relists_while_other_branches_use_persisted_entries()

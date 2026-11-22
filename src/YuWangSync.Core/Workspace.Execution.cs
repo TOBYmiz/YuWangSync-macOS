@@ -279,13 +279,44 @@ public sealed partial class Workspace
             throw new IOException("上传快照已变化，停止发送。");
         if (!op.MutationStarted)
         {
+            if (op.OverwriteConfirmed)
+            {
+                // Explicit overwrite uses the current same-name target. Automatic
+                // edit writeback still requires its original content baseline.
+                var matches = target.Items.Where(i => i.Name.Equals(op.Name, StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (matches.Length > 1 || matches.Any(i => i.IsFolder))
+                    throw new ConflictException("覆盖目标有多个同名条目或同名目录，请先核对。");
+                var replacementTarget = matches.SingleOrDefault();
+                if (replacementTarget is null && (entry.RemoteId != 0 || entry.RemoteMissing))
+                    throw new ConflictException("原文件已不在目标目录，停止覆盖。");
+                if (replacementTarget is not null)
+                {
+                    lock (_metadataGate)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        op = Store.GetOperation(op.Id) ?? throw new IOException("任务不存在。");
+                        if (op.IsTerminal) throw new OperationCanceledException(ct);
+                        var cachedTarget = Store.FindRemoteEntry(op.AccountId, entry.DiskId, replacementTarget.Id, false);
+                        if (cachedTarget is not null && cachedTarget.Id != entry.Id
+                            && (cachedTarget.Dirty || Store.Operations(op.AccountId).Any(o => o.EntryId == cachedTarget.Id && !o.IsTerminal)))
+                            throw new ConflictException("新的云端版本已有独立编辑或待办，请先处理该副本。");
+                        entry = FromRemote(RequireEntry(entry.Id), replacementTarget, parent.Id);
+                        op = op with { Name = replacementTarget.Name, BaselineStamp = entry.RemoteStamp };
+                        Store.Save(cachedTarget is not null && cachedTarget.Id != entry.Id
+                            ? [entry, cachedTarget with { RemoteId = 0, RemoteMissing = true }] : [entry], [op]);
+                    }
+                }
+            }
             var old = target.Items.SingleOrDefault(i => i.Id == entry.RemoteId && !i.IsFolder);
             if (entry.RemoteId != 0)
             {
                 if (old is null || Entry.Stamp(old) != op.BaselineStamp) throw new ConflictException("云端文件已更新、移动或删除，暂停覆盖。");
-                if (op.BaselineHash is null) throw new ConflictException("没有可靠的编辑基准，请明确确认覆盖或另存副本。");
-                var currentHash = await cloud.HashAsync(entry with { Name = old.Name, DeclaredSize = old.Size }, ct);
-                if (currentHash.Hash != op.BaselineHash) throw new ConflictException("云端内容已被其他操作修改，请处理冲突。");
+                if (!op.OverwriteConfirmed)
+                {
+                    if (op.BaselineHash is null) throw new ConflictException("没有可靠的编辑基准，请明确确认覆盖或另存副本。");
+                    var currentHash = await cloud.HashAsync(entry with { Name = old.Name, DeclaredSize = old.Size }, ct);
+                    if (currentHash.Hash != op.BaselineHash) throw new ConflictException("云端内容已被其他操作修改，请处理冲突。");
+                }
             }
             else if (target.Items.Any(i => i.Name.Equals(op.Name, StringComparison.OrdinalIgnoreCase)))
                 throw new ConflictException("云端新增了同名文件，请选择跳过、覆盖或改名。");
@@ -295,9 +326,9 @@ public sealed partial class Workspace
             Remember(op.Id, o => o with { OldRemoteId = entry.RemoteId, BackupName = backup, MutationStarted = true });
             op = Store.GetOperation(op.Id)!;
         }
-        // A retry may find the old ID under the backup name. It must still contain our
-        // original baseline before we let the inherited replacement protocol recycle it.
-        if (op.OldRemoteId != 0 && target.Items.Any(i => i.Id == op.OldRemoteId))
+        // Automatic writeback checks the old/backup content on recovery. Explicit
+        // overwrite never downloads the old file, including during a retry.
+        if (!op.OverwriteConfirmed && op.OldRemoteId != 0 && target.Items.Any(i => i.Id == op.OldRemoteId))
         {
             var old = target.Items.Single(i => i.Id == op.OldRemoteId);
             if (op.BaselineHash is null || (await cloud.HashAsync(entry with { RemoteId = old.Id, Name = old.Name, DeclaredSize = old.Size }, ct)).Hash != op.BaselineHash)

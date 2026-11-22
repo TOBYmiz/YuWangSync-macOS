@@ -71,6 +71,7 @@ public sealed record Operation
     public long SnapshotLength { get; init; }
     public string? SourcePath { get; init; }
     public CollisionChoice Collision { get; init; }
+    public bool OverwriteConfirmed { get; init; }
     public bool Force { get; init; }
     public bool MutationStarted { get; init; }
     public ulong OldRemoteId { get; init; }

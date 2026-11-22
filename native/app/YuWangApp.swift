@@ -400,6 +400,31 @@ enum NativeSelfTest {
                 try await Task.sleep(nanoseconds: 100_000_000)
             }
             checks["native-action-to-engine"] = model.state?.operations.contains { $0.entryId == entryID && $0.state == "completed" } == true
+            // Exercise the same batch action as the collision sheet over the real
+            // engine pipe, with the worker paused so applying cannot wait for upload.
+            if let original = state.entries.first(where: { !$0.isDirectory && $0.parentId == folder }) {
+                _ = try await model.send("pause", ["value": true])
+                let inputs = URL(fileURLWithPath: state.dataDirectory).appendingPathComponent("collision-ui-selftest")
+                try FileManager.default.createDirectory(at: inputs, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: inputs) }
+                let source = inputs.appendingPathComponent(original.name)
+                try Data("同名文件覆盖自检".utf8).write(to: source)
+                try await model.importPaths([source.path])
+                let collisionIDs = model.collisionIDs
+                checks["collision-import-prompts"] = model.showCollisions && collisionIDs.count == 1
+                try await model.applyCollisionChoices(Dictionary(uniqueKeysWithValues: collisionIDs.map { ($0, "replace") }), operationIDs: collisionIDs)
+                model.showCollisions = false
+                let queued = try await model.send("state")["operations"] as? [[String: Any]] ?? []
+                checks["collision-apply-queues"] = collisionIDs.count == 1 && model.collisionIDs.isEmpty
+                    && queued.contains { collisionIDs.contains($0["id"] as? String ?? "") && $0["state"] as? String == "queued" && $0["overwriteConfirmed"] as? Bool == true }
+                _ = try await model.send("networkCost", ["value": "unmetered"])
+                _ = try await model.send("pause", ["value": false])
+                for _ in 0..<80 {
+                    if model.state?.operations.contains(where: { collisionIDs.contains($0.id) && $0.state == "completed" }) == true { break }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                checks["collision-upload-continues"] = model.state?.operations.contains { collisionIDs.contains($0.id) && $0.state == "completed" } == true
+            } else { checks["collision-import-prompts"] = false }
             if let file = model.state?.entries.first(where: { !$0.isDirectory }) { model.selection = [file.id] }
             model.showTasks = true
             try await Task.sleep(nanoseconds: 400_000_000)

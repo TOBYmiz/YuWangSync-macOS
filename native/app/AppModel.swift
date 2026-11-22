@@ -223,6 +223,14 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    func applyCollisionChoices(_ choices: [String: String], operationIDs: [String]) async throws {
+        for id in operationIDs {
+            _ = try await send("resolve", ["operationId": id, "choice": choices[id] ?? "skip"])
+            collisionIDs.removeAll { $0 == id }
+        }
+        showTasks = true
+        message = "已应用同名文件的处理方式，任务将继续执行。"
+    }
     func newFolder() {
         guard let parent = state?.folderId else { return }
         perform { if let name = await self.prompt("新建文件夹", value: "新建文件夹", detail: "在“\(self.currentFolder?.name ?? "当前文件夹")”中创建。") { _ = try await self.send("createFolder", ["parentId": parent, "name": name]); self.showTasks = true } }

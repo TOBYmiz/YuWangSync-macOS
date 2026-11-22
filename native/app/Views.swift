@@ -423,11 +423,12 @@ struct CollisionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var choices: [String: String] = [:]
     @State private var busy = false
+    @State private var errorMessage: String?
     var conflicts: [CloudOperation] { model.state?.operations.filter { model.collisionIDs.contains($0.id) && !$0.isTerminal } ?? [] }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(conflicts.isEmpty ? "处理同名文件" : "处理 \(conflicts.count) 个同名文件").font(.title2.bold())
-            Text("同名文件夹已合并。请为每个同名文件选择处理方式；覆盖前会再次核对云端版本。")
+            Text("同名文件夹已合并。请为每个同名文件选择处理方式；覆盖会直接上传所选文件，不下载校验旧文件。")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             List(conflicts) { op in
                 HStack {
@@ -437,26 +438,33 @@ struct CollisionSheet: View {
                         Text("跳过").tag("skip"); Text("覆盖").tag("replace"); Text("改名上传").tag("rename")
                     }.labelsHidden().frame(width: 130)
                 }
-            }.frame(height: 250)
+            }.frame(height: 250).disabled(busy)
             .overlay {
                 if conflicts.isEmpty {
                     ContentUnavailableView("没有待处理的同名文件", systemImage: "checkmark.circle").allowsHitTesting(false)
                 }
             }
+            if let errorMessage {
+                Text(errorMessage).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
-                Button("全部跳过") { for op in conflicts { choices[op.id] = "skip" } }
-                Button("全部改名") { for op in conflicts { choices[op.id] = "rename" } }; Spacer()
-                Button("稍后处理") { dismiss() }.keyboardShortcut(.cancelAction).help("保留在任务列表中，稍后再选择")
+                Button("全部跳过") { for op in conflicts { choices[op.id] = "skip" } }.disabled(busy)
+                Button("全部改名") { for op in conflicts { choices[op.id] = "rename" } }.disabled(busy); Spacer()
+                if busy { ProgressView().controlSize(.small) }
+                Button("稍后处理") { dismiss() }.keyboardShortcut(.cancelAction).help("保留在任务列表中，稍后再选择").disabled(busy)
                 Button("应用") {
-                    busy = true; let operations = conflicts
-                    model.perform {
+                    busy = true; errorMessage = nil
+                    let ids = conflicts.map(\.id), selectedChoices = choices
+                    Task { @MainActor in
                         defer { busy = false }
-                        for op in operations { _ = try await model.send("resolve", ["operationId": op.id, "choice": choices[op.id] ?? "skip"]) }
-                        dismiss()
+                        do {
+                            try await model.applyCollisionChoices(selectedChoices, operationIDs: ids)
+                            dismiss()
+                        } catch { errorMessage = error.localizedDescription }
                     }
                 }.keyboardShortcut(.defaultAction).disabled(busy || conflicts.isEmpty)
             }.controlSize(.small)
-        }.padding(24).frame(width: 600)
+        }.padding(24).frame(width: 600).interactiveDismissDisabled(busy)
     }
 }
 

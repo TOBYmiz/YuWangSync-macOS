@@ -299,8 +299,26 @@ public sealed partial class Workspace
     {
         var op = Store.GetOperation(operationId) ?? throw new IOException("任务不存在。");
         if (op.State == OperationState.Running || op.MutationStarted) throw new IOException("该事务可能已执行，必须先通过重试核对结果，不能当作新的上传。");
+        if (choice is not (CollisionChoice.Skip or CollisionChoice.Replace or CollisionChoice.Rename))
+            throw new ArgumentException("无效的冲突选择。", nameof(choice));
         if (choice == CollisionChoice.Skip) { Cancel(operationId); return; }
         var entry = RequireEntry(op.EntryId); CheckAccount(entry);
+        if (choice == CollisionChoice.Replace && op.Kind == OperationKind.Upload)
+        {
+            // Applying a choice only persists intent. The worker checks the target
+            // and permission without downloading the old file or probing directory sizes.
+            await _planning.WaitAsync(ct);
+            try
+            {
+                op = Store.GetOperation(operationId) ?? throw new IOException("任务不存在。");
+                if (op.IsTerminal || op.State == OperationState.Running || op.MutationStarted)
+                    throw new IOException("任务状态已变化，请在任务列表中核对。");
+                Store.Save(operations: [op with { State = OperationState.Queued, Error = null, RetryAfter = null,
+                    Collision = CollisionChoice.Replace, OverwriteConfirmed = true, BaselineHash = null }]);
+            }
+            finally { _planning.Release(); }
+            Notify(); return;
+        }
         if (choice == CollisionChoice.Rename)
         {
             if (op.Kind != OperationKind.Upload) throw new IOException("仅上传任务可以另存云端副本。");
@@ -314,30 +332,15 @@ public sealed partial class Workspace
                 Store.UpdateEntry(entry.Id, e => e with { LocalPath = null, Dirty = false, ContentHash = null });
             }
             Store.Save([copy], [op with { EntryId = copy.Id, Name = newName, State = OperationState.Queued, Error = null,
-                BaselineHash = null, BaselineStamp = "", Collision = CollisionChoice.Rename }]); Notify(); return;
+                BaselineHash = null, BaselineStamp = "", Collision = CollisionChoice.Rename, OverwriteConfirmed = false }]); Notify(); return;
         }
         var rawParent = RequireEntry(op.TargetParentId ?? entry.ParentId!.Value);
-        await BrowseAsync(rawParent.Id, true, ct);
+        await BrowseAsync(rawParent.Id, true, ct, probeSizes: false);
         entry = RequireEntry(entry.Id);
-        if (op.Kind == OperationKind.Upload && (entry.RemoteId == 0 || entry.RemoteMissing))
-        {
-            var candidate = Store.Entries(op.AccountId).SingleOrDefault(e => e.ParentId == rawParent.Id && !e.RemoteMissing && !e.IsDirectory && e.RemoteId != 0 && e.Name == op.Name);
-            if (candidate is not null && candidate.Id != entry.Id)
-            {
-                if (candidate.Dirty || Store.Operations(op.AccountId).Any(o => o.EntryId == candidate.Id && !o.IsTerminal))
-                    throw new ConflictException("新的云端版本已有独立编辑或待办，请先处理该副本。");
-                entry = entry with { RemoteId = candidate.RemoteId, RemoteStamp = candidate.RemoteStamp, RemoteMissing = false, Size = candidate.Size, UploadTime = candidate.UploadTime };
-                Store.Save(entries: [entry, candidate with { RemoteId = 0, RemoteMissing = true }]);
-            }
-            else if (entry.RemoteMissing) throw new ConflictException("云端没有可明确覆盖的同名文件；可选择另存副本。");
-        }
-        else if (entry.RemoteMissing) throw new ConflictException("原条目已不存在，不能继续此操作。");
-        string? hash = null;
-        if (op.Kind == OperationKind.Upload && entry.RemoteId != 0)
-            hash = (await WithCloudAsync(entry.AccountId, (c, t) => c.HashAsync(entry, t), ct)).Hash;
+        if (entry.RemoteMissing) throw new ConflictException("原条目已不存在，不能继续此操作。");
         if (entry.IsDirectory && op.Kind is OperationKind.Delete or OperationKind.Move) await CacheSubtreeAsync(entry.Id, ct);
         Store.Save(operations: [op with { EntryId = entry.Id, State = OperationState.Queued, Error = null, RetryAfter = null,
-            BaselineStamp = entry.RemoteStamp, BaselineHash = hash ?? op.BaselineHash, Collision = CollisionChoice.Replace,
+            BaselineStamp = entry.RemoteStamp, Collision = CollisionChoice.Replace,
             BaselineTree = entry.IsDirectory ? CachedTreeBaseline(entry.Id) : op.BaselineTree }]); Notify();
     }
     public static string UniqueName(string name, IEnumerable<string> names)

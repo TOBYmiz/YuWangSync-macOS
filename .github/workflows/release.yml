@@ -87,6 +87,8 @@ jobs:
           MACOS_SIGNING_CERTIFICATE_P12: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
           MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
         run: bash tools/prepare-macos-signing.sh
+      - name: Check DMG retry handling
+        run: bash tools/test-hdiutil-retry.sh
       - name: Build and package self-contained application
         env:
           YUWANG_DMG_CAPTURE: '1'

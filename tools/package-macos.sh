@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$root/tools/hdiutil-retry.sh"
 cd "$root"
 [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo 'Requires an Apple Silicon Mac.' >&2; exit 1; }
 source_version="$(sed -n 's/^[[:space:]]*<Version>\([^<]*\)<\/Version>.*/\1/p' Directory.Build.props | head -n1)"
@@ -82,16 +83,25 @@ dmg_python="$work/dmg-tools/bin/python3"
 dmg="$root/artifacts/YuWangSync-macOS-arm64-$release_version.dmg"
 mount="$work/dmg-mount"
 mkdir -p "$mount"
-hdiutil create -ov -volname "育网云" -srcfolder "$image_root" -format UDRW -fs HFS+ "$work/layout.dmg"
+hdiutil_retry create -ov -volname "育网云" -srcfolder "$image_root" -format UDRW -fs HFS+ "$work/layout.dmg"
+# Register cleanup before attach: even an unsuccessful attach can leave a volume.
+cleanup_dmg_mount() {
+  local status=$?
+  trap - EXIT
+  if ! hdiutil_retry detach "$mount" >/dev/null 2>&1; then
+    echo "Could not detach temporary DMG mount: $mount" >&2
+  fi
+  exit "$status"
+}
+trap cleanup_dmg_mount EXIT
 hdiutil attach -nobrowse -mountpoint "$mount" "$work/layout.dmg"
-trap 'hdiutil detach "$mount" >/dev/null 2>&1 || true' EXIT
 "$dmg_python" "$root/tools/dmg-layout.py" write "$mount"
-hdiutil detach "$mount"
+hdiutil_retry detach "$mount"
 trap - EXIT
-hdiutil convert "$work/layout.dmg" -ov -format UDZO -o "$dmg"
+hdiutil_retry convert "$work/layout.dmg" -ov -format UDZO -o "$dmg"
 hdiutil verify "$dmg"
+trap cleanup_dmg_mount EXIT
 hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg"
-trap 'hdiutil detach "$mount" >/dev/null 2>&1 || true' EXIT
 codesign --verify --deep --strict "$mount/YuWangSync.app"
 test "$(readlink "$mount/Applications")" = /Applications
 diff -qr "$app" "$mount/YuWangSync.app"
@@ -99,7 +109,7 @@ diff -qr "$app" "$mount/YuWangSync.app"
 if [[ "${YUWANG_DMG_CAPTURE:-0}" == 1 ]]; then
   "$work/dmg-artwork" capture "$mount" "$root/artifacts/ui-dmg-macos.png"
 fi
-hdiutil detach "$mount"
+hdiutil_retry detach "$mount"
 trap - EXIT
 (cd "$root/artifacts" && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256")
 echo "Created $app"

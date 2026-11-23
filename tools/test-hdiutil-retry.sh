@@ -13,7 +13,9 @@ cleanup_test_work() {
   return "$status"
 }
 trap cleanup_test_work EXIT
-export TMPDIR="$test_work"
+# Exercise trap quoting as well as cleanup under macOS's Bash 3.2.
+export TMPDIR="$test_work/logs with spaces and 'quotes'"
+mkdir -p "$TMPDIR"
 
 # Stub only the external command and delays. The real retry function runs with
 # errexit/pipefail enabled, including its subshell, logging and exit cleanup.
@@ -75,7 +77,7 @@ for scenario in success transient exhausted unrelated create-status-16 convert-t
   cmp "$test_work/args" "$test_work/expected-args"
   if [[ "$status" == 0 ]]; then grep -Fq continued "$test_work/output"
   else ! grep -Fq continued "$test_work/output"; fi
-  if compgen -G "$test_work/yuwang-hdiutil.*" > /dev/null; then
+  if compgen -G "$TMPDIR/yuwang-hdiutil.*" > /dev/null; then
     echo "Temporary hdiutil log leaked in scenario: $scenario" >&2; exit 1
   fi
   echo "Passed hdiutil retry scenario: $scenario"
@@ -140,7 +142,7 @@ for scenario in package-success attach-failure layout-failure verify-failure sig
   else test ! -f "$test_work/mounted"; fi
   if [[ "$status" == 0 ]]; then grep -Fq 'Created ' "$test_work/output"
   else ! grep -Fq 'Created ' "$test_work/output"; fi
-  if compgen -G "$test_work/yuwang-hdiutil.*" > /dev/null; then
+  if compgen -G "$TMPDIR/yuwang-hdiutil.*" > /dev/null; then
     echo "Temporary hdiutil log leaked in scenario: $scenario" >&2; exit 1
   fi
   echo "Passed DMG packaging scenario: $scenario"

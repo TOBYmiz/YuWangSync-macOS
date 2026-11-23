@@ -5,7 +5,9 @@
 hdiutil_retry() (
   local attempt status delay log
   log="$(mktemp "${TMPDIR:-/tmp}/yuwang-hdiutil.XXXXXX")" || exit 1
-  trap 'rm -f "$log"' EXIT
+  # Bash 3.2 can unwind function locals before running a subshell's EXIT trap.
+  # Capture the escaped path now so cleanup does not depend on the local scope.
+  trap "rm -f -- $(printf '%q' "$log")" EXIT
   for attempt in 1 2 3 4 5; do
     # Do not pipe hdiutil through tee: diskimages-helper can keep the pipe open.
     if LC_ALL=C hdiutil "$@" >"$log" 2>&1; then

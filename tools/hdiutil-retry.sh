@@ -12,20 +12,27 @@ hdiutil_retry() (
     # Do not pipe hdiutil through tee: diskimages-helper can keep the pipe open.
     if LC_ALL=C hdiutil "$@" >"$log" 2>&1; then
       cat "$log"
-      exit 0
+      status=0
+      break
     else
       status=$?
     fi
     cat "$log" >&2
     if ! grep -Fq 'Resource busy' "$log" && ! [[ "$1" == detach && "$status" == 16 ]]; then
-      exit "$status"
+      break
     fi
     if [[ "$attempt" == 5 ]]; then
       echo "hdiutil $1: resource remained busy after $attempt attempts." >&2
-      exit "$status"
+      break
     fi
     delay=$((attempt * 2))
     echo "hdiutil $1: resource busy; retrying in ${delay}s (attempt $attempt/5)." >&2
     sleep "$delay"
   done
+  # Bash 3.2 can suppress a subshell's EXIT trap when called from an EXIT
+  # handler (including failed-attach cleanup). Remove the log before exiting;
+  # the trap above remains a fallback for unexpected early termination.
+  rm -f -- "$log"
+  trap - EXIT
+  exit "$status"
 )

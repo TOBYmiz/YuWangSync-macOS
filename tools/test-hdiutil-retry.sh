@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+printf 'Checking DMG retry handling with Bash %s\n' "$BASH_VERSION"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$root/tools/hdiutil-retry.sh"
 test_parent="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
@@ -54,7 +55,7 @@ for scenario in success transient exhausted unrelated create-status-16 convert-t
   # in an if condition would disable errexit throughout that function.
   export scenario test_work operation
   export -f hdiutil sleep hdiutil_retry
-  bash -euo pipefail -c 'hdiutil_retry "$operation" -ov "image with spaces.dmg"; echo continued' \
+  "$BASH" -euo pipefail -c 'hdiutil_retry "$operation" -ov "image with spaces.dmg"; echo continued' \
     > "$test_work/output" 2>&1 || status=$?
   case "$scenario" in
     success) expected_status=0; expected_calls=1; expected_delays=0 ;;
@@ -91,13 +92,20 @@ test -s "$test_work/package-dmg.sh"
 export dmg_test_root="$test_work/package with spaces"
 mkdir -p "$dmg_test_root/artifacts" "$dmg_test_root/work"
 hdiutil() {
-  local operation=$1
+  local operation=$1 detach_count
   echo "$operation" >> "$test_work/trace"
   case "$operation" in
     attach)
       : > "$test_work/mounted"
-      [[ "$scenario" != attach-failure ]] || return 23 ;;
+      case "$scenario" in
+        attach-failure|cleanup-transient|cleanup-exhausted) return 23 ;;
+      esac ;;
     detach)
+      detach_count="$(grep -c '^detach$' "$test_work/trace")"
+      if [[ "$scenario" == cleanup-exhausted || ( "$scenario" == cleanup-transient && "$detach_count" -lt 3 ) ]]; then
+        echo 'hdiutil: detach failed - Resource busy' >&2
+        return 16
+      fi
       [[ "$scenario" != cleanup-failure ]] || return 27
       rm -f "$test_work/mounted" ;;
     verify) [[ "$scenario" != verify-failure ]] || return 25 ;;
@@ -117,12 +125,13 @@ diff() { return 0; }
 shasum() { echo 'synthetic checksum'; }
 export -f hdiutil dmg_layout codesign readlink diff shasum
 
-for scenario in package-success attach-failure layout-failure verify-failure signature-failure cleanup-failure; do
+for scenario in package-success attach-failure layout-failure verify-failure signature-failure cleanup-failure cleanup-transient cleanup-exhausted; do
   : > "$test_work/trace"
+  : > "$test_work/delays"
   rm -f "$test_work/mounted"
   export scenario
   status=0
-  bash -euo pipefail -c '
+  "$BASH" -euo pipefail -c '
     root="$dmg_test_root"; work="$root/work"; app="$root/app"; image_root="$root/image"
     release_version=1.0.0; dmg_python=dmg_layout; YUWANG_DMG_CAPTURE=0
     source "$test_work/package-dmg.sh"
@@ -133,13 +142,21 @@ for scenario in package-success attach-failure layout-failure verify-failure sig
     layout-failure|cleanup-failure) expected_status=24; expected_detaches=1 ;;
     verify-failure) expected_status=25; expected_detaches=1 ;;
     signature-failure) expected_status=26; expected_detaches=2 ;;
+    cleanup-transient) expected_status=23; expected_detaches=3 ;;
+    cleanup-exhausted) expected_status=23; expected_detaches=5 ;;
   esac
   [[ "$status" == "$expected_status" ]]
   [[ "$(grep -c '^detach$' "$test_work/trace")" == "$expected_detaches" ]]
-  if [[ "$scenario" == cleanup-failure ]]; then
+  if [[ "$scenario" == cleanup-failure || "$scenario" == cleanup-exhausted ]]; then
     test -f "$test_work/mounted"
     grep -Fq 'Could not detach temporary DMG mount:' "$test_work/output"
   else test ! -f "$test_work/mounted"; fi
+  : > "$test_work/expected-delays"
+  case "$scenario" in
+    cleanup-transient) printf '%s\n' 2 4 > "$test_work/expected-delays" ;;
+    cleanup-exhausted) printf '%s\n' 2 4 6 8 > "$test_work/expected-delays" ;;
+  esac
+  cmp "$test_work/delays" "$test_work/expected-delays"
   if [[ "$status" == 0 ]]; then grep -Fq 'Created ' "$test_work/output"
   else ! grep -Fq 'Created ' "$test_work/output"; fi
   if compgen -G "$TMPDIR/yuwang-hdiutil.*" > /dev/null; then

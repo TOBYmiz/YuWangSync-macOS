@@ -122,7 +122,15 @@ jobs:
             if test -f "$diagnostic"; then echo "--- $diagnostic"; cat "$diagnostic"; fi
           done
           ps -ax -o pid,command | grep '[Y]uWangSync' || true
-          python3 -c 'import json; assert json.load(open("artifacts/ui-macos.json"))["passed"]'
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('artifacts/ui-macos.json').read_text(encoding='utf-8'))
+          if not report['passed']:
+              print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+              raise SystemExit('Native UI self-test failed; see the report above.')
+          print(f"Native UI self-test passed: {len(report['checks'])} checks.")
+          PY
           for attempt in {1..5}; do
             pgrep -x YuWangSync >/dev/null || break
             sleep 1

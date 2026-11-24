@@ -329,6 +329,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
 @MainActor
 enum NativeSelfTest {
     private static var ran = false
+    // Includes the three collision import/apply/upload checks.
+    private static let expectedCheckCount = 51
     static func run(model: AppModel) async {
         guard !ran else { return }; ran = true
         NativeDiagnostics.write("self-test entered")
@@ -466,7 +468,9 @@ enum NativeSelfTest {
         } catch let failure { error = failure.localizedDescription + "\n" + model.bridge.stderr }
         NativeDiagnostics.write("self-test requesting engine shutdown")
         checks["engine-shutdown"] = await AppDelegate.shared?.prepareForTermination() == true
-        let passed = checks.count == 48 && checks.values.allSatisfy { $0 } && error.isEmpty
+        let failedChecks = checks.filter { !$0.value }.keys.sorted()
+        let passed = checks.count == expectedCheckCount && failedChecks.isEmpty && error.isEmpty
+        NativeDiagnostics.write("self-test result: checks=\(checks.count)/\(expectedCheckCount) failed=\(failedChecks) error=\(error)")
         do {
             let output = URL(fileURLWithPath: path); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: ["passed": passed, "nativeControls": true, "checks": checks, "windowChrome": chrome, "error": error], options: [.prettyPrinted, .sortedKeys])

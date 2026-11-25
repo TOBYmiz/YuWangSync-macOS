@@ -23,6 +23,8 @@ macOS 原生客户端（macOS 14+、Apple Silicon）。界面用 SwiftUI / AppKi
 
 Mac 数据位于 `~/Library/Application Support/YuWangSync`，缓存位于 `~/Library/Caches/YuWangSync`。
 
+运行日志位于数据目录的 `logs` 文件夹。每次启动单独创建一份带 UTC 启动时间和唯一标识的 `application-*.log`，包含本次运行在内仅保留最新 10 次；同次运行不按大小拆分。升级后会清理旧格式的 `application.log` 和 `application.log.previous`。
+
 双击打开的副本受应用管理，保存后排队回传。主动离线下载是一次性快照，不跟踪后续云端更新。刷新重查云端列表，不覆盖本地编辑。
 
 未完成任务、冲突和本地修改不会被缓存清理删除。上传前使用稳定文件快照。设置中“上传文件后下载校验”默认开启，“使用数据流量/热点时启用”默认关闭，网络类型由 macOS 费用标记识别。校验在空闲时下载文件并校验。

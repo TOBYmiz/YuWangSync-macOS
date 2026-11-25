@@ -46,7 +46,8 @@ public sealed class EngineHost : IAsyncDisposable
     private Account? _loginAccount;
     private string? _loginPassword;
     private Guid? _folder;
-    private readonly object _stateLock = new(), _logLock = new();
+    private readonly object _stateLock = new();
+    private readonly RunLog _log;
     private readonly object _enumerationLock = new();
     private CancellationTokenSource? _enumerationStop;
     private Task? _enumerationTask;
@@ -63,15 +64,8 @@ public sealed class EngineHost : IAsyncDisposable
         IFileSnapshotProvider snapshots = OperatingSystem.IsMacOS() ? new MacSnapshotProvider() : new FileSnapshotProvider();
         var cloud = demo ? new DemoCloudClient() : null;
         _workspace = new(new OperationStore(files.DatabasePath), files, secrets, snapshots, cloud is null ? null : (_, _) => cloud);
-        _workspace.Log = message =>
-        {
-            lock (_logLock)
-            {
-                var path = Path.Combine(files.DataRoot, "application.log");
-                if (File.Exists(path) && new FileInfo(path).Length > 4 * 1024 * 1024) File.Move(path, path + ".previous", true);
-                File.AppendAllText(path, $"{DateTimeOffset.Now:O} {message.Replace('\r', ' ').Replace('\n', ' ')}\n");
-            }
-        };
+        _log = new RunLog(files.DataRoot);
+        _workspace.Log = _log.Write;
         _stateTimer = new(_ =>
         {
             Interlocked.Exchange(ref _stateScheduled, 0);
@@ -405,8 +399,8 @@ public sealed class EngineHost : IAsyncDisposable
     {
         if (_disposed) return; _disposed = true; _running = false; _stateTimer.Dispose();
         _workspace.Changed -= ScheduleState; _transfer?.Cancel(); _loginStop?.Cancel(); _sizeStop?.Cancel(); _login?.Dispose();
-        await StopBackgroundEnumerationAsync();
-        await _workspace.DisposeAsync();
+        try { await StopBackgroundEnumerationAsync(); await _workspace.DisposeAsync(); }
+        finally { _log.Dispose(); }
     }
 }
 
